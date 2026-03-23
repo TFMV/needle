@@ -96,25 +96,44 @@ Needle includes a benchmark program demonstrating **graph construction, search p
 go run bench/needle_benchmark.go -dim 128 -n 10000 -queries 100 -k 10
 ```
 
-Metrics reported:
+* **🟢** — excellent (low latency / high recall)
+* **🟡** — moderate (okay latency / slightly lower recall)
+* **🔴** — poor (high latency / low recall)
 
-* **build_time_ms** – Time to construct the graph.
-* **avg_latency_ms** – Average query latency.
-* **p95_latency_ms** – 95th percentile query latency.
-* **qps** – Queries per second.
-* **memory_mb** – Memory footprint of graph and vectors.
-* **recall_at_K** – Accuracy compared to brute-force top-K search.
+---
 
-Sample output:
+## Needle Benchmark Heatmap (n=5k–10k, dim=64–128)
 
-```
-build_time_ms 350.23
-avg_latency_ms 0.42
-p95_latency_ms 0.87
-qps 238095.00
-memory_mb 45
-recall_at_10 0.9400
-```
+| n   | dim | k  | ef  | m  | Build Time | Avg Latency | Recall   |
+| --- | --- | -- | --- | -- | ---------- | ----------- | -------- |
+| 5k  | 64  | 5  | 64  | 16 | 🟢 327 ms  | 🟡 0.68 ms  | 🟢 0.996 |
+| 5k  | 64  | 5  | 64  | 32 | 🟡 504 ms  | 🟢 0.33 ms  | 🟢 1.000 |
+| 5k  | 64  | 5  | 128 | 16 | 🟡 643 ms  | 🟡 0.70 ms  | 🟢 0.996 |
+| 5k  | 64  | 5  | 128 | 32 | 🟡 710 ms  | 🟢 0.48 ms  | 🟢 1.000 |
+| 5k  | 64  | 10 | 64  | 16 | 🟢 423 ms  | 🟢 0.15 ms  | 🟡 0.988 |
+| 5k  | 64  | 10 | 64  | 32 | 🟡 397 ms  | 🟡 0.74 ms  | 🟢 1.000 |
+| 5k  | 128 | 5  | 64  | 16 | 🟡 459 ms  | 🟡 0.88 ms  | 🟡 0.976 |
+| 5k  | 128 | 5  | 64  | 32 | 🟡 568 ms  | 🟢 0.44 ms  | 🟢 1.000 |
+| 5k  | 128 | 5  | 128 | 16 | 🟡 855 ms  | 🟡 0.55 ms  | 🟢 0.996 |
+| 5k  | 128 | 5  | 128 | 32 | 🟡 1022 ms | 🟡 1.33 ms  | 🟢 1.000 |
+| 10k | 64  | 5  | 64  | 16 | 🟡 1111 ms | 🟢 0.32 ms  | 🟡 0.980 |
+| 10k | 64  | 5  | 64  | 32 | 🟡 1105 ms | 🟢 0.24 ms  | 🟢 1.000 |
+| 10k | 64  | 5  | 128 | 16 | 🟡 1733 ms | 🟡 0.51 ms  | 🟢 1.000 |
+| 10k | 64  | 5  | 128 | 32 | 🟡 1687 ms | 🟢 0.49 ms  | 🟢 1.000 |
+| 10k | 128 | 5  | 64  | 16 | 🟡 1245 ms | 🟡 1.10 ms  | 🟡 0.964 |
+| 10k | 128 | 5  | 64  | 32 | 🟡 1671 ms | 🟢 0.40 ms  | 🟢 0.992 |
+| 10k | 128 | 5  | 128 | 16 | 🟡 1954 ms | 🟡 0.45 ms  | 🟡 0.984 |
+| 10k | 128 | 5  | 128 | 32 | 🟡 3014 ms | 🟢 0.63 ms  | 🟢 1.000 |
+
+---
+
+### 🔹 Quick Takeaways
+
+* **🟢 Green cells** highlight sweet spots where latency is low **and** recall is near-perfect.
+* **🟡 Yellow cells** indicate moderate trade-offs: slightly higher latency or recall < 0.995.
+* **🔴 Red cells** (none here yet) would indicate configurations to avoid.
+* For **small-medium vectors (`dim ≤ 64`, `n ≤ 5k`)**, `m=32, ef=64` is ideal.
+* For **higher dimensions or larger datasets**, boost `ef` and `m` to maintain perfect recall.
 
 ---
 

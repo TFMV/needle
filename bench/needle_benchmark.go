@@ -75,8 +75,7 @@ func main() {
 	// Build graph
 	g := needle.NewGraphFloat32(*dim)
 	g.SetExecutor(&needle.SimpleExecutor[float32]{})
-	git config --global user.name "TFMV"
-    git config --global user.email mcgeehan@gmail.com
+
 	// Add batch using AddBatch
 	items := make([]struct {
 		ID  int

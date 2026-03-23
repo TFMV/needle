@@ -490,3 +490,15 @@ func (g *Graph[T]) AddBatch(items []struct {
 func (g *Graph[T]) SetExecutor(exec Executor[T]) {
 	g.exec = exec
 }
+
+// SetParams allows tuning of HNSW parameters: connectivity (m) and ef (search depth)
+func (g *Graph[T]) SetParams(m int, ef int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if m > 0 {
+		g.m = m
+	}
+	if ef > 0 {
+		g.ef = ef
+	}
+}

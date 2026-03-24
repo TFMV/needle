@@ -2,6 +2,7 @@ package needle
 
 import (
 	"math/rand"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,7 +18,12 @@ func TestPQIntegration(t *testing.T) {
 	config := DefaultConfig()
 	config.dim = dim
 	config.pqThreshold = pqThreshold
+
+	var trainingWg sync.WaitGroup
 	g := NewGraphFromConfig[float32](config)
+	g.trainingWg = &trainingWg
+
+	trainingWg.Add(1)
 
 	// Add initial vectors to trigger PQ training
 	for i := 0; i < pqThreshold; i++ {
@@ -28,7 +34,9 @@ func TestPQIntegration(t *testing.T) {
 		g.Add(i, vec)
 	}
 
-	assert.True(t, g.pqTrained, "PQ codec should be trained")
+	trainingWg.Wait()
+
+	assert.True(t, g.pqTrained.Load(), "PQ codec should be trained")
 
 	// Add more vectors after PQ is trained
 	for i := pqThreshold; i < numVectors; i++ {

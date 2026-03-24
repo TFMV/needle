@@ -54,10 +54,57 @@ func TestAddAndSearch(t *testing.T) {
 	q := []float32{0.1, 0.1}
 	res, err := g.Search(q, 1)
 	if err != nil {
-			t.Fatalf("Search failed: %v", err)
+		t.Fatalf("Search failed: %v", err)
 	}
 	if len(res) != 1 {
-			t.Fatalf("expected 1 result, got %d", len(res))
+		t.Fatalf("expected 1 result, got %d", len(res))
+	}
+	if res[0] != 0 {
+		t.Errorf("expected result ID 0, got %d", res[0])
+	}
+}
+
+// TestAddAndSearchWithOPQ verifies adding nodes and nearest neighbor search with OPQ enabled
+func TestAddAndSearchWithOPQ(t *testing.T) {
+	points := [][]float32{
+		{0, 0, 0, 0, 0, 0, 0, 0},
+		{1, 1, 1, 1, 1, 1, 1, 1},
+		{2, 2, 2, 2, 2, 2, 2, 2},
+		{3, 3, 3, 3, 3, 3, 3, 3},
+		{4, 4, 4, 4, 4, 4, 4, 4},
+	}
+
+	config := DefaultConfig()
+	config.dim = 8
+	config.useOPQ = true
+	config.pqThreshold = 5 // Trigger OPQ training after all points are added
+
+	var trainingWg sync.WaitGroup
+	g := NewGraphFromConfig[float32](config)
+	g.trainingWg = &trainingWg
+
+	trainingWg.Add(1)
+	for i, p := range points {
+		if err := g.Add(i, p); err != nil {
+			t.Fatalf("Add failed: %v", err)
+		}
+	}
+
+	trainingWg.Wait()
+
+	if !g.opqTrained.Load() {
+		t.Fatal("OPQ was not trained")
+	}
+
+	// Search for the point closest to {0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1}
+	// The result should be point {0, 0, 0, 0, 0, 0, 0, 0} which has ID 0
+	q := []float32{0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1}
+	res, err := g.Search(q, 1)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(res))
 	}
 	if res[0] != 0 {
 		t.Errorf("expected result ID 0, got %d", res[0])

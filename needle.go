@@ -97,6 +97,29 @@ func newNode(id, idx, lvl int) *Node {
 	return &Node{id: id, idx: idx, level: lvl, neighbors: nbrs}
 }
 
+// Config holds the configuration for the Graph.
+// Use DefaultConfig() to get a new Config with default values.
+type Config[T Float] struct {
+	dim            int
+	m              int
+	efSearch       int
+	efConstruction int
+	pqThreshold    int
+	dist           DistanceFunc[T]
+}
+
+// DefaultConfig returns a new Config with default values for float32.
+func DefaultConfig() *Config[float32] {
+	return &Config[float32]{
+		dim:            128,
+		m:              16,
+		efSearch:       64,
+		efConstruction: 128,
+		pqThreshold:    1000,
+		dist:           l2Float32,
+	}
+}
+
 type Graph[T Float] struct {
 	dim int
 
@@ -109,6 +132,12 @@ type Graph[T Float] struct {
 	// storage
 	vectorData []T
 
+	// PQ
+	pq          *PQCodec[T]
+	pqCodes     [][]byte
+	pqThreshold int
+	pqTrained   bool
+
 	nodes   []*Node
 	idToIdx map[int]int
 
@@ -119,28 +148,29 @@ type Graph[T Float] struct {
 
 	visited *VisitedList
 
-	/////////////////////
-	// FUTURE EXTENSION //
-	/////////////////////
-
-	pq      PQCodec[T]
 	storage Storage
 	exec    Executor[T]
+}
+
+// NewGraphFromConfig creates a new Graph from the given configuration.
+func NewGraphFromConfig[T Float](config *Config[T]) *Graph[T] {
+	return &Graph[T]{
+		dim:            config.dim,
+		m:              config.m,
+		efSearch:       config.efSearch,
+		efConstruction: config.efConstruction,
+		dist:           config.dist,
+		vectorData:     make([]T, 0),
+		nodes:          make([]*Node, 0),
+		idToIdx:        make(map[int]int),
+		visited:        NewVisited(0),
+		pqThreshold:    config.pqThreshold,
+	}
 }
 
 func (g *Graph[T]) getVector(idx int) []T {
 	start := idx * g.dim
 	return g.vectorData[start : start+g.dim]
-}
-
-/////////////////////////
-// PQ (PLUGGABLE CORE) //
-/////////////////////////
-
-type PQCodec[T Float] interface {
-	Encode(vec []T) []byte
-	Decode(code []byte) []T
-	Distance(query []T, code []byte) float32
 }
 
 //////////////////////
@@ -159,24 +189,6 @@ type Storage interface {
 
 type Executor[T Float] interface {
 	Scan(g *Graph[T], query []T, k int) []int
-}
-
-//////////////////////////
-// CONSTRUCTOR         //
-//////////////////////////
-
-func NewGraphFloat32(dim int) *Graph[float32] {
-	return &Graph[float32]{
-		dim:            dim,
-		m:              16,
-		efSearch:       64,
-		efConstruction: 128,
-		dist:           l2Float32,
-		vectorData:     make([]float32, 0),
-		nodes:          make([]*Node, 0),
-		idToIdx:        make(map[int]int),
-		visited:        NewVisited(0),
-	}
 }
 
 //////////////////////
@@ -200,6 +212,13 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 	}
 
 	g.vectorData = append(g.vectorData, vec...)
+	// Handle PQ code
+	if g.pqTrained {
+		g.pqCodes = append(g.pqCodes, g.pq.Encode(vec))
+	} else {
+		g.pqCodes = append(g.pqCodes, nil) // Placeholder
+	}
+
 	node := newNode(id, idx, g.randomLevel())
 
 	g.nodes = append(g.nodes, node)
@@ -209,6 +228,30 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 		atomic.StorePointer(&g.enter, unsafe.Pointer(node))
 		atomic.StoreInt32(&g.level, int32(node.level))
 		return nil
+	}
+
+	if !g.pqTrained && len(g.nodes) >= g.pqThreshold {
+		// Naive assumption that T is float32 for PQ for now
+		vectors := make([][]T, len(g.nodes))
+		for i := 0; i < len(g.nodes); i++ {
+			vectors[i] = g.getVector(i)
+		}
+
+		pq, err := NewPQCodec[T](g.dim, 8, 256, g.dist)
+		if err != nil {
+			return err // Or handle error appropriately
+		}
+
+		if err := pq.Train(vectors); err != nil {
+			return err // Or handle error appropriately
+		}
+
+		g.pq = pq
+		// Now, encode all existing vectors
+		for i := 0; i < len(g.nodes); i++ {
+			g.pqCodes[i] = g.pq.Encode(g.getVector(i))
+		}
+		g.pqTrained = true
 	}
 
 	g.connect(node)
@@ -331,7 +374,12 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *Visited
 			}
 			visited.Mark(i)
 
-			d := g.dist(q, g.getVector(i))
+			var d float32
+			if g.pqTrained {
+				d = g.pq.Distance(q, g.pqCodes[i])
+			} else {
+				d = g.dist(q, g.getVector(i))
+			}
 
 			if res.Len() < ef || d < (*res)[0].dist {
 				c := newCand(i, d)
@@ -396,8 +444,13 @@ func (g *Graph[T]) selectNeighborsHeuristic(cands []*candidate, m int) []*candid
 		candVec := g.getVector(cand.idx)
 
 		for _, selectedNeighbor := range selected {
-			selectedNeighborVec := g.getVector(selectedNeighbor.idx)
-			distToSelected := g.dist(candVec, selectedNeighborVec)
+			var distToSelected float32
+			if g.pqTrained {
+				distToSelected = g.pq.Distance(candVec, g.pqCodes[selectedNeighbor.idx])
+			} else {
+				selectedNeighborVec := g.getVector(selectedNeighbor.idx)
+				distToSelected = g.dist(candVec, selectedNeighborVec)
+			}
 
 			if distToSelected < cand.dist {
 				isGood = false

@@ -105,6 +105,7 @@ type Config[T Float] struct {
 	efSearch       int
 	efConstruction int
 	pqThreshold    int
+	useOPQ         bool // Add this line
 	dist           DistanceFunc[T]
 }
 
@@ -116,40 +117,55 @@ func DefaultConfig() *Config[float32] {
 		efSearch:       64,
 		efConstruction: 128,
 		pqThreshold:    1000,
+		useOPQ:         false, // Add this line
 		dist:           l2Float32,
 	}
 }
 
+// Graph represents the HNSW graph.
+// It stores the graph structure, vector data, and configurations for search and insertion.
 type Graph[T Float] struct {
-	dim int
+	dim int // Dimension of the vectors
 
-	m              int
-	efSearch       int
-	efConstruction int
+	// HNSW parameters
+	m              int // Max number of neighbors for each node
+	efSearch       int // Size of the dynamic candidate list for search
+	efConstruction int // Size of the dynamic candidate list for construction
 
-	dist DistanceFunc[T]
+	dist DistanceFunc[T] // Distance function to use
 
-	// storage
-	vectorData []T
+	// Data storage
+	vectorData []T // Stores the raw vectors
 
-	// PQ
-	pq          *PQCodec[T]
-	pqCodes     [][]byte
-	pqThreshold int
-	pqTrained   bool
+	// Product Quantization (PQ)
+	pq          *PQCodec[T]   // PQ codec for vector compression
+	pqCodes     [][]byte      // PQ codes for each vector
+	pqThreshold int           // Number of vectors to store before training PQ
+	pqTrained   atomic.Bool   // Flag indicating whether PQ is trained
 
-	nodes   []*Node
-	idToIdx map[int]int
+	// Optimized Product Quantization (OPQ)
+	opq         *OPQCodec[T]  // OPQ codec for vector compression
+	opqTrained  atomic.Bool   // Flag indicating whether OPQ is trained
+	useOPQ      bool          // Flag to enable OPQ
 
-	enter unsafe.Pointer
-	level int32
+	// Graph structure
+	nodes   []*Node     // Slice of nodes in the graph
+	idToIdx map[int]int // Map from external ID to internal index
 
-	mu sync.RWMutex
+	enter unsafe.Pointer // Entry point to the graph
+	level atomic.Int32   // Highest level in the graph
 
-	visited *VisitedList
+	mu sync.RWMutex // Mutex for concurrent access
 
-	storage Storage
-	exec    Executor[T]
+	visited *VisitedList // Visited list for search
+
+	// Memory pools for performance optimization
+	minHeapPool sync.Pool // Pool for min-heaps used in search
+	maxHeapPool sync.Pool // Pool for max-heaps used in search
+	arenaPool   sync.Pool // Pool for candidate arenas used in search
+
+	// For testing purposes
+	trainingWg *sync.WaitGroup
 }
 
 // NewGraphFromConfig creates a new Graph from the given configuration.
@@ -165,6 +181,22 @@ func NewGraphFromConfig[T Float](config *Config[T]) *Graph[T] {
 		idToIdx:        make(map[int]int),
 		visited:        NewVisited(0),
 		pqThreshold:    config.pqThreshold,
+		useOPQ:         config.useOPQ,
+		minHeapPool: sync.Pool{
+			New: func() interface{} {
+				return &minHeap{}
+			},
+		},
+		maxHeapPool: sync.Pool{
+			New: func() interface{} {
+				return &maxHeap{}
+			},
+		},
+		arenaPool: sync.Pool{
+			New: func() interface{} {
+				return make([]candidate, 0, 1024)
+			},
+		},
 	}
 }
 
@@ -184,17 +216,20 @@ type Storage interface {
 }
 
 //////////////////////
-// EXECUTION LAYER  //
-//////////////////////
-
-type Executor[T Float] interface {
-	Scan(g *Graph[T], query []T, k int) []int
-}
-
-//////////////////////
 // INSERTION        //
 //////////////////////
 
+// Add adds a new vector to the graph with a given ID.
+//
+// The process involves:
+// 1. Assigning an internal index to the new vector.
+// 2. Storing the vector data.
+// 3. If PQ/OPQ is enabled and not yet trained, triggering the training process
+//    once the number of vectors reaches the specified threshold.
+// 4. Creating a new node for the vector with a randomly assigned level.
+// 5. Connecting the new node to the graph by finding its neighbors.
+//
+// This function acquires a lock to ensure thread safety during graph modification.
 func (g *Graph[T]) Add(id int, vec []T) error {
 	if len(vec) != g.dim {
 		return fmt.Errorf("dimension mismatch")
@@ -213,8 +248,10 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 
 	g.vectorData = append(g.vectorData, vec...)
 	// Handle PQ code
-	if g.pqTrained {
+	if g.pqTrained.Load() {
 		g.pqCodes = append(g.pqCodes, g.pq.Encode(vec))
+	} else if g.opqTrained.Load() {
+		g.pqCodes = append(g.pqCodes, g.opq.Encode(vec))
 	} else {
 		g.pqCodes = append(g.pqCodes, nil) // Placeholder
 	}
@@ -226,32 +263,12 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 
 	if idx == 0 {
 		atomic.StorePointer(&g.enter, unsafe.Pointer(node))
-		atomic.StoreInt32(&g.level, int32(node.level))
+		g.level.Store(int32(node.level))
 		return nil
 	}
 
-	if !g.pqTrained && len(g.nodes) >= g.pqThreshold {
-		// Naive assumption that T is float32 for PQ for now
-		vectors := make([][]T, len(g.nodes))
-		for i := 0; i < len(g.nodes); i++ {
-			vectors[i] = g.getVector(i)
-		}
-
-		pq, err := NewPQCodec[T](g.dim, 8, 256, g.dist)
-		if err != nil {
-			return err // Or handle error appropriately
-		}
-
-		if err := pq.Train(vectors); err != nil {
-			return err // Or handle error appropriately
-		}
-
-		g.pq = pq
-		// Now, encode all existing vectors
-		for i := 0; i < len(g.nodes); i++ {
-			g.pqCodes[i] = g.pq.Encode(g.getVector(i))
-		}
-		g.pqTrained = true
+	if !g.pqTrained.Load() && !g.opqTrained.Load() && len(g.nodes) >= g.pqThreshold {
+		go g.trainQuantizer()
 	}
 
 	g.connect(node)
@@ -259,10 +276,73 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 	return nil
 }
 
+// trainQuantizer trains the PQ or OPQ quantizer in a separate goroutine.
+func (g *Graph[T]) trainQuantizer() {
+	// For testing purposes, we can wait for the training to finish.
+	if g.trainingWg != nil {
+		defer g.trainingWg.Done()
+	}
+
+	// This function should be called without holding the graph's lock.
+	// It will acquire the lock when needed.
+	g.mu.Lock()
+	vectors := make([][]T, len(g.nodes))
+	for i := 0; i < len(g.nodes); i++ {
+		vectors[i] = g.getVector(i)
+	}
+	g.mu.Unlock()
+
+	if g.useOPQ {
+		opq, opqErr := NewOPQCodec[T](g.dim, 8, 256, g.dist)
+		if opqErr != nil {
+			// Handle error appropriately, e.g., log it
+			return
+		}
+		if trainErr := opq.Train(vectors); trainErr != nil {
+			// Handle error
+			return
+		}
+
+		g.mu.Lock()
+		g.opq = opq
+		for i := 0; i < len(g.nodes); i++ {
+			g.pqCodes[i] = g.opq.Encode(g.getVector(i))
+		}
+		g.opqTrained.Store(true)
+		g.mu.Unlock()
+	} else {
+		pq, pqErr := NewPQCodec[T](g.dim, 8, 256, g.dist)
+		if pqErr != nil {
+			// Handle error
+			return
+		}
+		if trainErr := pq.Train(vectors); trainErr != nil {
+			// Handle error
+			return
+		}
+
+		g.mu.Lock()
+		g.pq = pq
+		for i := 0; i < len(g.nodes); i++ {
+			g.pqCodes[i] = g.pq.Encode(g.getVector(i))
+		}
+		g.pqTrained.Store(true)
+		g.mu.Unlock()
+	}
+}
+
+
 //////////////////////
 // SEARCH           //
 //////////////////////
 
+// Search performs a k-nearest neighbor search for the given query vector.
+//
+// The search process starts from the entry point at the highest level of the graph.
+// It greedily traverses the graph at each level to find the best entry point for the next lower level.
+// Once it reaches the base layer (level 0), it performs a more exhaustive search to find the k-nearest neighbors.
+//
+// This function acquires a read lock to allow for concurrent searches.
 func (g *Graph[T]) Search(q []T, k int) ([]int, error) {
 	if len(q) != g.dim {
 		return nil, fmt.Errorf("bad query dim")
@@ -273,10 +353,6 @@ func (g *Graph[T]) Search(q []T, k int) ([]int, error) {
 
 	if len(g.nodes) == 0 {
 		return []int{}, nil
-	}
-
-	if g.exec != nil {
-		return g.exec.Scan(g, q, k), nil
 	}
 
 	res := g.search(q, k)
@@ -291,20 +367,24 @@ func (g *Graph[T]) Search(q []T, k int) ([]int, error) {
 func (g *Graph[T]) search(q []T, k int) []*candidate {
 	ep := (*Node)(atomic.LoadPointer(&g.enter))
 
-	maxLevel := int(atomic.LoadInt32(&g.level))
+	maxLevel := int(g.level.Load())
 
+	// Greedily traverse from the top level down to level 1
 	for l := maxLevel; l > 0; l-- {
 		ep = g.greedy(q, ep, l)
 	}
 
+	// Perform the main search on the base layer (level 0)
 	cands := g.searchLayer(q, ep, 0, max(g.efSearch, k), g.visited)
 
+	// If the number of candidates is greater than k, return the top k
 	if len(cands) > k {
 		return cands[:k]
 	}
 
 	return cands
 }
+
 
 //////////////////////
 // CORE SEARCH      //
@@ -333,11 +413,14 @@ func (g *Graph[T]) greedy(q []T, cur *Node, lvl int) *Node {
 func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *VisitedList) []*candidate {
 	visited.Reset()
 
-	// Arena-based allocation for this search
-	arena := make([]candidate, ef*20)
+	arena := g.arenaPool.Get().([]candidate)
+	arena = arena[:0]
+	defer g.arenaPool.Put(arena)
+
 	arenaIdx := 0
 	newCand := func(idx int, dist float32) *candidate {
-		if arenaIdx < len(arena) {
+		if arenaIdx < cap(arena) {
+			arena = arena[:arenaIdx+1]
 			c := &arena[arenaIdx]
 			c.idx = idx
 			c.dist = dist
@@ -348,8 +431,13 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *Visited
 		return &candidate{idx, dist}
 	}
 
-	pq := &minHeap{}
-	res := &maxHeap{}
+	pq := g.minHeapPool.Get().(*minHeap)
+	pq.Reset()
+	defer g.minHeapPool.Put(pq)
+
+	res := g.maxHeapPool.Get().(*maxHeap)
+	res.Reset()
+	defer g.maxHeapPool.Put(res)
 
 	d0 := g.dist(q, g.getVector(entry.idx))
 	c0 := newCand(entry.idx, d0)
@@ -375,7 +463,9 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *Visited
 			visited.Mark(i)
 
 			var d float32
-			if g.pqTrained {
+			if g.opqTrained.Load() {
+				d = g.opq.Distance(q, g.pqCodes[i])
+			} else if g.pqTrained.Load() {
 				d = g.pq.Distance(q, g.pqCodes[i])
 			} else {
 				d = g.dist(q, g.getVector(i))
@@ -407,7 +497,7 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *Visited
 func (g *Graph[T]) connect(n *Node) {
 	ep := (*Node)(atomic.LoadPointer(&g.enter))
 
-	maxLevel := int(atomic.LoadInt32(&g.level))
+	maxLevel := int(g.level.Load())
 
 	cur := ep
 
@@ -418,7 +508,7 @@ func (g *Graph[T]) connect(n *Node) {
 
 	for l := min(n.level, maxLevel); l >= 0; l-- {
 		cands := g.searchLayer(vector, cur, l, g.efConstruction, g.visited)
-		selected := g.selectNeighborsHeuristic(cands, g.m)
+		selected := g.selectNeighbors(cands, g.m)
 
 		for _, c := range selected {
 			n.neighbors[l] = append(n.neighbors[l], uint32(c.idx))
@@ -427,8 +517,12 @@ func (g *Graph[T]) connect(n *Node) {
 	}
 }
 
-// selectNeighborsHeuristic selects M diverse neighbors from a set of candidates using the HNSW heuristic.
-func (g *Graph[T]) selectNeighborsHeuristic(cands []*candidate, m int) []*candidate {
+// selectNeighbors selects M diverse neighbors from a set of candidates.
+func (g *Graph[T]) selectNeighbors(cands []*candidate, m int) []*candidate {
+	// This is the heuristic from the HNSW paper.
+	// It attempts to select a diverse set of neighbors.
+	// This is NOT the same as the simpler heuristic from the reference implementation.
+
 	selected := make([]*candidate, 0, m)
 	if len(cands) == 0 {
 		return selected
@@ -439,13 +533,14 @@ func (g *Graph[T]) selectNeighborsHeuristic(cands []*candidate, m int) []*candid
 			break
 		}
 
-		// Heuristic: Add the candidate if it's closer to the query node than to any neighbor already selected.
 		isGood := true
 		candVec := g.getVector(cand.idx)
 
 		for _, selectedNeighbor := range selected {
 			var distToSelected float32
-			if g.pqTrained {
+			if g.opqTrained.Load() {
+				distToSelected = g.opq.Distance(candVec, g.pqCodes[selectedNeighbor.idx])
+			} else if g.pqTrained.Load() {
 				distToSelected = g.pq.Distance(candVec, g.pqCodes[selectedNeighbor.idx])
 			} else {
 				selectedNeighborVec := g.getVector(selectedNeighbor.idx)
@@ -541,20 +636,6 @@ func ArrowExport(g *Graph[float32], alloc memory.Allocator) *array.Float32 {
 	return builder.NewFloat32Array()
 }
 
-//////////////////////
-// EXECUTION ENGINE //
-//////////////////////
-
-type SimpleExecutor[T Float] struct{}
-
-func (e *SimpleExecutor[T]) Scan(g *Graph[T], q []T, k int) []int {
-	res := g.search(q, k)
-	out := make([]int, len(res))
-	for i := range res {
-		out[i] = g.nodes[res[i].idx].id
-	}
-	return out
-}
 
 // AddBatch adds multiple items to the graph at once.
 func (g *Graph[T]) AddBatch(items []struct {
@@ -567,10 +648,6 @@ func (g *Graph[T]) AddBatch(items []struct {
 		}
 	}
 	return nil
-}
-
-func (g *Graph[T]) SetExecutor(exec Executor[T]) {
-	g.exec = exec
 }
 
 // SetParams allows tuning of HNSW parameters.

@@ -19,6 +19,10 @@ func (h *minHeap) Pop() any {
 	return x
 }
 
+func (h *minHeap) Reset() {
+	*h = (*h)[:0]
+}
+
 // maxHeap is a max-heap of candidates.
 type maxHeap []*candidate
 
@@ -36,4 +40,8 @@ func (h *maxHeap) Pop() any {
 	x := old[n-1]
 	*h = old[0 : n-1]
 	return x
+}
+
+func (h *maxHeap) Reset() {
+	*h = (*h)[:0]
 }

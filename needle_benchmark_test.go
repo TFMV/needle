@@ -72,11 +72,21 @@ func setupGraph(b *testing.B, n, dim int, vectors [][]float32) *Graph[float32] {
 	config.dim = dim
 	g := NewGraphFromConfig[float32](config)
 
+	items := make([]struct {
+		ID  int
+		Vec []float32
+	}, n)
 	for i := 0; i < n; i++ {
-		if err := g.Add(i, vectors[i]); err != nil {
-			b.Fatalf("Failed to add vector: %v", err)
-		}
+		items[i] = struct {
+			ID  int
+			Vec []float32
+		}{ID: i, Vec: vectors[i]}
 	}
+
+	if err := g.AddBatch(items); err != nil {
+		b.Fatalf("Failed to add vectors in batch: %v", err)
+	}
+
 	b.ReportAllocs()
 	return g
 }

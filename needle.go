@@ -16,6 +16,21 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
+const cacheLineSize = 64
+
+func alignedAllocator[T Float](size int) []T {
+	buf := make([]T, size+cacheLineSize)
+	ptr := unsafe.Pointer(&buf[0])
+	offset := int(uintptr(ptr)) & (cacheLineSize - 1)
+	var aligned []T
+	if offset == 0 {
+		aligned = buf[:size]
+	} else {
+		aligned = buf[cacheLineSize-offset : size+cacheLineSize-offset]
+	}
+	return aligned
+}
+
 func syscallMmap(f *os.File, size int) ([]byte, error) {
 	return syscall.Mmap(
 		int(f.Fd()),
@@ -89,12 +104,12 @@ type Node struct {
 	neighbors [][]uint32
 }
 
-func newNode(id, idx, lvl int) *Node {
+func newNode(id, idx, lvl int) Node {
 	nbrs := make([][]uint32, lvl+1)
 	for i := range nbrs {
 		nbrs[i] = make([]uint32, 0, 32)
 	}
-	return &Node{id: id, idx: idx, level: lvl, neighbors: nbrs}
+	return Node{id: id, idx: idx, level: lvl, neighbors: nbrs}
 }
 
 // Config holds the configuration for the Graph.
@@ -149,7 +164,7 @@ type Graph[T Float] struct {
 	useOPQ      bool          // Flag to enable OPQ
 
 	// Graph structure
-	nodes   []*Node     // Slice of nodes in the graph
+	nodes   []Node      // Slice of nodes in the graph
 	idToIdx map[int]int // Map from external ID to internal index
 
 	enter unsafe.Pointer // Entry point to the graph
@@ -160,9 +175,10 @@ type Graph[T Float] struct {
 	visited *VisitedList // Visited list for search
 
 	// Memory pools for performance optimization
-	minHeapPool sync.Pool // Pool for min-heaps used in search
-	maxHeapPool sync.Pool // Pool for max-heaps used in search
-	arenaPool   sync.Pool // Pool for candidate arenas used in search
+	minHeapPool        sync.Pool // Pool for min-heaps used in search
+	maxHeapPool        sync.Pool // Pool for max-heaps used in search
+	arenaPool          sync.Pool // Pool for candidate arenas used in search
+	candidateSlicePool sync.Pool // Pool for candidate slices used in searchLayer
 
 	// For testing purposes
 	trainingWg *sync.WaitGroup
@@ -176,8 +192,8 @@ func NewGraphFromConfig[T Float](config *Config[T]) *Graph[T] {
 		efSearch:       config.efSearch,
 		efConstruction: config.efConstruction,
 		dist:           config.dist,
-		vectorData:     make([]T, 0),
-		nodes:          make([]*Node, 0),
+		vectorData:     alignedAllocator[T](0),
+		nodes:          make([]Node, 0),
 		idToIdx:        make(map[int]int),
 		visited:        NewVisited(0),
 		pqThreshold:    config.pqThreshold,
@@ -195,6 +211,12 @@ func NewGraphFromConfig[T Float](config *Config[T]) *Graph[T] {
 		arenaPool: sync.Pool{
 			New: func() interface{} {
 				return make([]candidate, 0, 1024)
+			},
+		},
+		candidateSlicePool: sync.Pool{
+			New: func() interface{} {
+				slice := make([]*candidate, 0, 128)
+				return &slice
 			},
 		},
 	}
@@ -246,7 +268,16 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 		g.visited.arr = newArr
 	}
 
-	g.vectorData = append(g.vectorData, vec...)
+	// Grow vectorData if needed
+	if len(g.vectorData) < (idx+1)*g.dim {
+		newSize := (idx + 1) * g.dim * 2 // Double the size
+		newVecData := alignedAllocator[T](newSize)
+		copy(newVecData, g.vectorData)
+		g.vectorData = newVecData
+	}
+
+	copy(g.getVector(idx), vec)
+
 	// Handle PQ code
 	if g.pqTrained.Load() {
 		g.pqCodes = append(g.pqCodes, g.pq.Encode(vec))
@@ -262,7 +293,7 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 	g.idToIdx[id] = idx
 
 	if idx == 0 {
-		atomic.StorePointer(&g.enter, unsafe.Pointer(node))
+		atomic.StorePointer(&g.enter, unsafe.Pointer(&g.nodes[0]))
 		g.level.Store(int32(node.level))
 		return nil
 	}
@@ -271,7 +302,7 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 		go g.trainQuantizer()
 	}
 
-	g.connect(node)
+	g.connect(&g.nodes[idx])
 
 	return nil
 }
@@ -379,7 +410,7 @@ func (g *Graph[T]) search(q []T, k int) []*candidate {
 
 	// If the number of candidates is greater than k, return the top k
 	if len(cands) > k {
-		return cands[:k]
+		cands = cands[:k]
 	}
 
 	return cands
@@ -398,7 +429,7 @@ func (g *Graph[T]) greedy(q []T, cur *Node, lvl int) *Node {
 	for changed {
 		changed = false
 		for _, ni := range best.neighbors[lvl] {
-			n := g.nodes[int(ni)]
+			n := &g.nodes[int(ni)]
 			d := g.dist(q, g.getVector(n.idx))
 			if d < bestDist {
 				bestDist = d
@@ -453,7 +484,7 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *Visited
 			break
 		}
 
-		node := g.nodes[c.idx]
+		node := &g.nodes[c.idx]
 
 		for _, ni := range node.neighbors[lvl] {
 			i := int(ni)
@@ -483,10 +514,20 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *Visited
 		}
 	}
 
-	out := make([]*candidate, res.Len())
-	for i := len(out) - 1; i >= 0; i-- {
-		out[i] = heap.Pop(res).(*candidate)
+	outPtr := g.candidateSlicePool.Get().(*[]*candidate)
+	out := *outPtr
+	out = out[:0]
+
+	for res.Len() > 0 {
+		out = append(out, heap.Pop(res).(*candidate))
 	}
+
+	// Reverse the slice to get the correct order (nearest to farthest).
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+
+	*outPtr = out
 	return out
 }
 
@@ -509,6 +550,7 @@ func (g *Graph[T]) connect(n *Node) {
 	for l := min(n.level, maxLevel); l >= 0; l-- {
 		cands := g.searchLayer(vector, cur, l, g.efConstruction, g.visited)
 		selected := g.selectNeighbors(cands, g.m)
+		g.candidateSlicePool.Put(&cands)
 
 		for _, c := range selected {
 			n.neighbors[l] = append(n.neighbors[l], uint32(c.idx))

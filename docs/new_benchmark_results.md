@@ -71,3 +71,13 @@ After a thorough overhaul of the k-means algorithm, we have achieved a high-reca
 3.  **Convergence Check**: The k-means algorithm now includes a convergence check. It terminates early if the centroids stabilize, which significantly speeds up the training process.
 
 The optimized PQ implementation now provides a viable solution for reducing memory usage while maintaining high recall.
+
+## SIMD Optimization
+
+We have implemented a SIMD-optimized L2 distance function for the `amd64` architecture. The following benchmarks show the performance improvement.
+
+*   **`BenchmarkBuild`**:
+    *   **Time per operation**: 572,743,443 ns (0.57 seconds)
+*   **`BenchmarkSearchLatency`**:
+    *   **Time per operation**: 127,073,309 ns (127 ms)
+*   **`BenchmarkSearchRecall`**: **98.6% recall@10**

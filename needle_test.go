@@ -7,11 +7,13 @@ import (
 	"testing"
 )
 
-// TestNewGraphFloat32 validates the constructor
-func TestNewGraphFloat32(t *testing.T) {
-	g := NewGraphFloat32(2)
+// TestNewGraphFromConfig validates the constructor
+func TestNewGraphFromConfig(t *testing.T) {
+	config := DefaultConfig()
+	config.dim = 2
+	g := NewGraphFromConfig[float32](config)
 	if g == nil {
-		t.Fatal("NewGraphFloat32 returned nil")
+		t.Fatal("NewGraphFromConfig returned nil")
 	}
 	if g.dim != 2 {
 		t.Errorf("expected dim=2, got %d", g.dim)
@@ -38,7 +40,9 @@ func TestAddAndSearch(t *testing.T) {
 		{2, 2},
 	}
 
-	g := NewGraphFloat32(2)
+	config := DefaultConfig()
+	config.dim = 2
+	g := NewGraphFromConfig[float32](config)
 	for i, p := range points {
 		if err := g.Add(i, p); err != nil {
 			t.Fatalf("Add failed: %v", err)
@@ -50,10 +54,10 @@ func TestAddAndSearch(t *testing.T) {
 	q := []float32{0.1, 0.1}
 	res, err := g.Search(q, 1)
 	if err != nil {
-		t.Fatalf("Search failed: %v", err)
+			t.Fatalf("Search failed: %v", err)
 	}
 	if len(res) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(res))
+			t.Fatalf("expected 1 result, got %d", len(res))
 	}
 	if res[0] != 0 {
 		t.Errorf("expected result ID 0, got %d", res[0])
@@ -62,7 +66,9 @@ func TestAddAndSearch(t *testing.T) {
 
 // TestSetParams validates parameter setting
 func TestSetParams(t *testing.T) {
-	g := NewGraphFloat32(4)
+	config := DefaultConfig()
+	config.dim = 4
+	g := NewGraphFromConfig[float32](config)
 	g.SetParams(32, 100, 200)
 
 	if g.m != 32 {
@@ -78,7 +84,9 @@ func TestSetParams(t *testing.T) {
 
 // TestConcurrentAddAndSearch tests the graph under concurrent access
 func TestConcurrentAddAndSearch(t *testing.T) {
-	g := NewGraphFloat32(8)
+	config := DefaultConfig()
+	config.dim = 8
+	g := NewGraphFromConfig[float32](config)
 	var wg sync.WaitGroup
 	var itemsAdded int32
 

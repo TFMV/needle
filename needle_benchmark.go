@@ -44,7 +44,9 @@ func BenchmarkHNSW(b *testing.B) {
 		for _, efc := range []int{64, 128} {
 			for _, efs := range []int{32, 64} {
 
-				g := NewGraphFloat32(dim)
+				config := DefaultConfig()
+				config.dim = dim
+				g := NewGraphFromConfig[float32](config)
 				g.SetParams(m, efs, efc)
 
 				// Populate graph before search benchmark

@@ -1,56 +1,55 @@
 //go:build amd64
-// +build amd64
 
 #include "textflag.h"
 
-// func euclideanSquaredAVX2(a, b []float64) float64
-TEXT ·euclideanSquaredAVX2(SB), NOSPLIT, $0-56
-    MOVQ a_base+0(FP), R8
-    MOVQ a_len+8(FP), R9
-    MOVQ b_base+24(FP), R10
+// func l2Float32(a, b []float32) float32
+TEXT ·l2Float32(SB), NOSPLIT, $0-56
+    MOVQ a_base+0(FP), AX
+    MOVQ a_len+8(FP), CX
+    MOVQ b_base+24(FP), DX
 
-    // Y0 will hold the running sums
-    VXORPD Y0, Y0, Y0
+    VZEROUPPER
 
-    XORQ R11, R11 // i = 0
+    PXOR X0, X0
+
+    // Process 8 elements at a time
+    SUBQ $8, CX
+    JL   tail
 
 loop:
-    MOVQ R9, R12
-    SUBQ $4, R12
-    CMPQ R11, R12
-    JG tail
+    VMOVUPS (AX), Y1
+    VMOVUPS (DX), Y2
+    VSUBPS  Y2, Y1, Y1
+    VFMADD231PS Y1, Y1, Y0
 
-    // Process 4 float64s at once
-    VMOVUPD (R8)(R11*8), Y1
-    VMOVUPD (R10)(R11*8), Y2
-    VSUBPD Y2, Y1, Y1
-    VMULPD Y1, Y1, Y1
-    VADDPD Y1, Y0, Y0
+    ADDQ $32, AX
+    ADDQ $32, DX
 
-    ADDQ $4, R11
-    JMP loop
+    SUBQ $8, CX
+    JGE  loop
 
 tail:
-    CMPQ R11, R9
-    JGE done
+    ADDQ $8, CX
+    JZ   done
 
-    VMOVSD (R8)(R11*8), X1
-    VMOVSD (R10)(R11*8), X2
-    VSUBSD X2, X1, X1
-    VMULSD X1, X1, X1
-    VADDSD X1, X0, X0
+tail_loop:
+    MOVSS (AX), X1
+    MOVSS (DX), X2
+    SUBSS X2, X1
+    MULSS X1, X1
+    ADDSS X1, X0
 
-    INCQ R11
-    JMP tail
+    ADDQ $4, AX
+    ADDQ $4, DX
+
+    DECQ CX
+    JNE  tail_loop
 
 done:
-    // Extract upper 128-bits into X1
     VEXTRACTF128 $1, Y0, X1
-    VADDPD X1, X0, X0
-    
-    // Horizontal add of the adjacent 64-bit values in X0
-    VHADDPD X0, X0, X0
-
-    VMOVSD X0, ret+48(FP)
+    VADDPS  X1, X0, X0
+    VHADDPS X0, X0, X0
+    VHADDPS X0, X0, X0
+    VMOVSS X0, ret+48(FP)
     VZEROUPPER
     RET

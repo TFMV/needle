@@ -1,16 +1,16 @@
 package needle
 
 import (
-	"container/heap"
 	"fmt"
 	"math"
 	"math/rand"
 	"os"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"container/heap"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -36,29 +36,6 @@ type Float interface {
 
 type DistanceFunc[T Float] func(a, b []T) float32
 
-func l2Float32(a, b []float32) float32 {
-	var sum float32
-	i := 0
-	for i <= len(a)-8 {
-		d0 := a[i] - b[i]
-		d1 := a[i+1] - b[i+1]
-		d2 := a[i+2] - b[i+2]
-		d3 := a[i+3] - b[i+3]
-		d4 := a[i+4] - b[i+4]
-		d5 := a[i+5] - b[i+5]
-		d6 := a[i+6] - b[i+6]
-		d7 := a[i+7] - b[i+7]
-		sum += d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
-		i += 8
-	}
-	for i < len(a) {
-		d := a[i] - b[i]
-		sum += d * d
-		i++
-	}
-	return sum
-}
-
 func l2Float64(a, b []float64) float32 {
 	var sum float64
 	for i := range a {
@@ -75,31 +52,6 @@ func l2Float64(a, b []float64) float32 {
 type candidate struct {
 	idx  int
 	dist float32
-}
-
-type minHeap []*candidate
-type maxHeap []*candidate
-
-func (h minHeap) Len() int           { return len(h) }
-func (h minHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
-func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *minHeap) Push(x any)        { *h = append(*h, x.(*candidate)) }
-func (h *minHeap) Pop() any {
-	old := *h
-	x := old[len(old)-1]
-	*h = old[:len(old)-1]
-	return x
-}
-
-func (h maxHeap) Len() int           { return len(h) }
-func (h maxHeap) Less(i, j int) bool { return h[i].dist > h[j].dist }
-func (h maxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *maxHeap) Push(x any)        { *h = append(*h, x.(*candidate)) }
-func (h *maxHeap) Pop() any {
-	old := *h
-	x := old[len(old)-1]
-	*h = old[:len(old)-1]
-	return x
 }
 
 //////////////////////
@@ -148,13 +100,14 @@ func newNode(id, idx, lvl int) *Node {
 type Graph[T Float] struct {
 	dim int
 
-	m  int
-	ef int
+	m              int
+	efSearch       int
+	efConstruction int
 
 	dist DistanceFunc[T]
 
 	// storage
-	vectors [][]T
+	vectorData []T
 
 	nodes   []*Node
 	idToIdx map[int]int
@@ -164,6 +117,8 @@ type Graph[T Float] struct {
 
 	mu sync.RWMutex
 
+	visited *VisitedList
+
 	/////////////////////
 	// FUTURE EXTENSION //
 	/////////////////////
@@ -171,6 +126,11 @@ type Graph[T Float] struct {
 	pq      PQCodec[T]
 	storage Storage
 	exec    Executor[T]
+}
+
+func (g *Graph[T]) getVector(idx int) []T {
+	start := idx * g.dim
+	return g.vectorData[start : start+g.dim]
 }
 
 /////////////////////////
@@ -207,13 +167,15 @@ type Executor[T Float] interface {
 
 func NewGraphFloat32(dim int) *Graph[float32] {
 	return &Graph[float32]{
-		dim:     dim,
-		m:       16,
-		ef:      64,
-		dist:    l2Float32,
-		vectors: make([][]float32, 0),
-		nodes:   make([]*Node, 0),
-		idToIdx: make(map[int]int),
+		dim:            dim,
+		m:              16,
+		efSearch:       64,
+		efConstruction: 128,
+		dist:           l2Float32,
+		vectorData:     make([]float32, 0),
+		nodes:          make([]*Node, 0),
+		idToIdx:        make(map[int]int),
+		visited:        NewVisited(0),
 	}
 }
 
@@ -231,7 +193,13 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 
 	idx := len(g.nodes)
 
-	g.vectors = append(g.vectors, vec)
+	if idx >= len(g.visited.arr) {
+		newArr := make([]uint32, (idx+1)*2)
+		copy(newArr, g.visited.arr)
+		g.visited.arr = newArr
+	}
+
+	g.vectorData = append(g.vectorData, vec...)
 	node := newNode(id, idx, g.randomLevel())
 
 	g.nodes = append(g.nodes, node)
@@ -257,6 +225,13 @@ func (g *Graph[T]) Search(q []T, k int) ([]int, error) {
 		return nil, fmt.Errorf("bad query dim")
 	}
 
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if len(g.nodes) == 0 {
+		return []int{}, nil
+	}
+
 	if g.exec != nil {
 		return g.exec.Scan(g, q, k), nil
 	}
@@ -279,7 +254,13 @@ func (g *Graph[T]) search(q []T, k int) []*candidate {
 		ep = g.greedy(q, ep, l)
 	}
 
-	return g.searchLayer(q, ep, 0, max(g.ef, k))
+	cands := g.searchLayer(q, ep, 0, max(g.efSearch, k), g.visited)
+
+	if len(cands) > k {
+		return cands[:k]
+	}
+
+	return cands
 }
 
 //////////////////////
@@ -288,14 +269,14 @@ func (g *Graph[T]) search(q []T, k int) []*candidate {
 
 func (g *Graph[T]) greedy(q []T, cur *Node, lvl int) *Node {
 	best := cur
-	bestDist := g.dist(q, g.vectors[cur.idx])
+	bestDist := g.dist(q, g.getVector(cur.idx))
 
 	changed := true
 	for changed {
 		changed = false
 		for _, ni := range best.neighbors[lvl] {
 			n := g.nodes[int(ni)]
-			d := g.dist(q, g.vectors[n.idx])
+			d := g.dist(q, g.getVector(n.idx))
 			if d < bestDist {
 				bestDist = d
 				best = n
@@ -306,16 +287,32 @@ func (g *Graph[T]) greedy(q []T, cur *Node, lvl int) *Node {
 	return best
 }
 
-func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int) []*candidate {
-	visited := NewVisited(len(g.nodes))
+func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *VisitedList) []*candidate {
+	visited.Reset()
+
+	// Arena-based allocation for this search
+	arena := make([]candidate, ef*20)
+	arenaIdx := 0
+	newCand := func(idx int, dist float32) *candidate {
+		if arenaIdx < len(arena) {
+			c := &arena[arenaIdx]
+			c.idx = idx
+			c.dist = dist
+			arenaIdx++
+			return c
+		}
+		// Fallback for large searches
+		return &candidate{idx, dist}
+	}
 
 	pq := &minHeap{}
 	res := &maxHeap{}
 
-	d0 := g.dist(q, g.vectors[entry.idx])
+	d0 := g.dist(q, g.getVector(entry.idx))
+	c0 := newCand(entry.idx, d0)
 
-	heap.Push(pq, &candidate{entry.idx, d0})
-	heap.Push(res, &candidate{entry.idx, d0})
+	heap.Push(pq, c0)
+	heap.Push(res, c0)
 	visited.Mark(entry.idx)
 
 	for pq.Len() > 0 {
@@ -334,11 +331,12 @@ func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int) []*candidate {
 			}
 			visited.Mark(i)
 
-			d := g.dist(q, g.vectors[i])
+			d := g.dist(q, g.getVector(i))
 
 			if res.Len() < ef || d < (*res)[0].dist {
-				heap.Push(pq, &candidate{i, d})
-				heap.Push(res, &candidate{i, d})
+				c := newCand(i, d)
+				heap.Push(pq, c)
+				heap.Push(res, c)
 
 				if res.Len() > ef {
 					heap.Pop(res)
@@ -365,13 +363,14 @@ func (g *Graph[T]) connect(n *Node) {
 
 	cur := ep
 
+	vector := g.getVector(n.idx)
 	for l := maxLevel; l > n.level; l-- {
-		cur = g.greedy(g.vectors[n.idx], cur, l)
+		cur = g.greedy(vector, cur, l)
 	}
 
 	for l := min(n.level, maxLevel); l >= 0; l-- {
-		cands := g.searchLayer(g.vectors[n.idx], cur, l, g.ef)
-		selected := selectTopK(cands, g.m)
+		cands := g.searchLayer(vector, cur, l, g.efConstruction, g.visited)
+		selected := g.selectNeighborsHeuristic(cands, g.m)
 
 		for _, c := range selected {
 			n.neighbors[l] = append(n.neighbors[l], uint32(c.idx))
@@ -380,17 +379,42 @@ func (g *Graph[T]) connect(n *Node) {
 	}
 }
 
+// selectNeighborsHeuristic selects M diverse neighbors from a set of candidates using the HNSW heuristic.
+func (g *Graph[T]) selectNeighborsHeuristic(cands []*candidate, m int) []*candidate {
+	selected := make([]*candidate, 0, m)
+	if len(cands) == 0 {
+		return selected
+	}
+
+	for _, cand := range cands {
+		if len(selected) >= m {
+			break
+		}
+
+		// Heuristic: Add the candidate if it's closer to the query node than to any neighbor already selected.
+		isGood := true
+		candVec := g.getVector(cand.idx)
+
+		for _, selectedNeighbor := range selected {
+			selectedNeighborVec := g.getVector(selectedNeighbor.idx)
+			distToSelected := g.dist(candVec, selectedNeighborVec)
+
+			if distToSelected < cand.dist {
+				isGood = false
+				break
+			}
+		}
+
+		if isGood {
+			selected = append(selected, cand)
+		}
+	}
+	return selected
+}
+
 //////////////////////
 // UTIL             //
 //////////////////////
-
-func selectTopK(c []*candidate, k int) []*candidate {
-	if len(c) <= k {
-		return c
-	}
-	sort.Slice(c, func(i, j int) bool { return c[i].dist < c[j].dist })
-	return c[:k]
-}
 
 func (g *Graph[T]) randomLevel() int {
 	l := 0
@@ -402,6 +426,13 @@ func (g *Graph[T]) randomLevel() int {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
@@ -451,11 +482,9 @@ func (m *MMapStore) Close() error {
 // ARROW IPC HOOK   //
 //////////////////////
 
-func ArrowExport(vecs [][]float32, alloc memory.Allocator) *array.Float32 {
+func ArrowExport(g *Graph[float32], alloc memory.Allocator) *array.Float32 {
 	builder := array.NewFloat32Builder(alloc)
-	for _, v := range vecs {
-		builder.AppendValues(v, nil)
-	}
+	builder.AppendValues(g.vectorData, nil)
 	return builder.NewFloat32Array()
 }
 
@@ -491,14 +520,17 @@ func (g *Graph[T]) SetExecutor(exec Executor[T]) {
 	g.exec = exec
 }
 
-// SetParams allows tuning of HNSW parameters: connectivity (m) and ef (search depth)
-func (g *Graph[T]) SetParams(m int, ef int) {
+// SetParams allows tuning of HNSW parameters.
+func (g *Graph[T]) SetParams(m, efSearch, efConstruction int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if m > 0 {
 		g.m = m
 	}
-	if ef > 0 {
-		g.ef = ef
+	if efSearch > 0 {
+		g.efSearch = efSearch
+	}
+	if efConstruction > 0 {
+		g.efConstruction = efConstruction
 	}
 }

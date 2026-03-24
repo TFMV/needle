@@ -1,11 +1,7 @@
-//go:build arm64
-// +build arm64
+//go:build !amd64 && !arm64
 
 package needle
 
-// l2Float32 utilizes Go's native ARM64 ASIMD auto-vectorization for Euclidean distance.
-// By completely unrolling the loop into 8-wide scalar bounds, the Go 1.20+
-// compiler natively compiles this into VFMLA and FADD instructions.
 func l2Float32(a, b []float32) float32 {
 	var sum float32
 	i := 0
@@ -21,7 +17,6 @@ func l2Float32(a, b []float32) float32 {
 		sum += d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
 		i += 8
 	}
-	// process remaining elements
 	for i < len(a) {
 		d := a[i] - b[i]
 		sum += d * d

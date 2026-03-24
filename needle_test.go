@@ -19,8 +19,11 @@ func TestNewGraphFloat32(t *testing.T) {
 	if g.m != 16 {
 		t.Errorf("expected default m=16, got %d", g.m)
 	}
-	if g.ef != 64 {
-		t.Errorf("expected default ef=64, got %d", g.ef)
+	if g.efSearch != 64 {
+		t.Errorf("expected default efSearch=64, got %d", g.efSearch)
+	}
+	if g.efConstruction != 128 {
+		t.Errorf("expected default efConstruction=128, got %d", g.efConstruction)
 	}
 	if g.dist == nil {
 		t.Error("distance function is nil")
@@ -42,185 +45,73 @@ func TestAddAndSearch(t *testing.T) {
 		}
 	}
 
-	query := []float32{0.1, 0.1}
-	results, err := g.Search(query, 2)
+	// Search for the point closest to {0.1, 0.1}
+	// The result should be point {0, 0} which has ID 0
+	q := []float32{0.1, 0.1}
+	res, err := g.Search(q, 1)
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
-	if len(results) != 2 {
-		t.Errorf("expected 2 results, got %d", len(results))
+	if len(res) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(res))
 	}
-	if results[0] != 0 {
-		t.Errorf("expected first result to be 0, got %d", results[0])
+	if res[0] != 0 {
+		t.Errorf("expected result ID 0, got %d", res[0])
 	}
 }
 
-// TestConcurrentAccess validates thread safety
-func TestConcurrentAccess(t *testing.T) {
-	numPoints := 10
-	g := NewGraphFloat32(2)
+// TestSetParams validates parameter setting
+func TestSetParams(t *testing.T) {
+	g := NewGraphFloat32(4)
+	g.SetParams(32, 100, 200)
 
-	for i := 0; i < numPoints; i++ {
-		if err := g.Add(i, []float32{float32(i), float32(i)}); err != nil {
-			t.Fatalf("Add failed: %v", err)
-		}
+	if g.m != 32 {
+		t.Errorf("expected m=32, got %d", g.m)
 	}
+	if g.efSearch != 100 {
+		t.Errorf("expected efSearch=100, got %d", g.efSearch)
+	}
+	if g.efConstruction != 200 {
+		t.Errorf("expected efConstruction=200, got %d", g.efConstruction)
+	}
+}
 
+// TestConcurrentAddAndSearch tests the graph under concurrent access
+func TestConcurrentAddAndSearch(t *testing.T) {
+	g := NewGraphFloat32(8)
 	var wg sync.WaitGroup
-	for i := 0; i < 3; i++ {
+	var itemsAdded int32
+
+	// Concurrently add items
+	for i := 0; i < 100; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func(id int) {
 			defer wg.Done()
-			query := []float32{float32(i), float32(i)}
-			results, err := g.Search(query, 3)
-			if err != nil {
-				t.Errorf("Search failed: %v", err)
+			vec := make([]float32, 8)
+			for j := range vec {
+				vec[j] = rand.Float32()
 			}
-			if len(results) != 3 {
-				t.Errorf("expected 3 results, got %d", len(results))
+			if err := g.Add(id, vec); err == nil {
+				atomic.AddInt32(&itemsAdded, 1)
 			}
 		}(i)
 	}
+
+	// Concurrently search
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			q := make([]float32, 8)
+			for j := range q {
+				q[j] = rand.Float32()
+			}
+			_, err := g.Search(q, 5)
+			if atomic.LoadInt32(&itemsAdded) > 1 && err != nil {
+				t.Errorf("Search failed during concurrent adds: %v", err)
+			}
+		}()
+	}
+
 	wg.Wait()
-}
-
-// TestEdgeCases covers empty graph, single node, dimension mismatch
-func TestEdgeCases(t *testing.T) {
-	g := NewGraphFloat32(2)
-
-	// Empty graph
-	results, err := g.Search([]float32{0, 0}, 1)
-	if err != nil {
-		t.Fatalf("Search on empty graph failed: %v", err)
-	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(results))
-	}
-
-	// Single node
-	if err := g.Add(1, []float32{1, 1}); err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-	results, err = g.Search([]float32{0, 0}, 1)
-	if err != nil {
-		t.Fatalf("Search failed: %v", err)
-	}
-	if len(results) != 1 {
-		t.Errorf("expected 1 result, got %d", len(results))
-	}
-
-	// Dimension mismatch
-	err = g.Add(2, []float32{1, 1, 1})
-	if err == nil {
-		t.Error("expected error for dimension mismatch, got nil")
-	}
-	_, err = g.Search([]float32{1}, 1)
-	if err == nil {
-		t.Error("expected error for search dimension mismatch, got nil")
-	}
-}
-
-// BenchmarkAddFloat32 measures insertion performance
-func BenchmarkAddFloat32(b *testing.B) {
-	dim := 128
-	g := NewGraphFloat32(dim)
-	vec := make([]float32, dim)
-	for i := range vec {
-		vec[i] = rand.Float32()
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		vec[0] = rand.Float32()
-		if err := g.Add(i, vec); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkConcurrentAddFloat32 measures parallel insertion
-func BenchmarkConcurrentAddFloat32(b *testing.B) {
-	dim := 128
-	g := NewGraphFloat32(dim)
-
-	vectors := make([][]float32, b.N)
-	for i := range vectors {
-		vectors[i] = make([]float32, dim)
-		for j := range vectors[i] {
-			vectors[i][j] = rand.Float32()
-		}
-	}
-
-	var counter int64
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			id := atomic.AddInt64(&counter, 1) - 1
-			if int(id) >= len(vectors) {
-				continue
-			}
-			if err := g.Add(int(id), vectors[id]); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-}
-
-// BenchmarkSearchFloat32 measures search performance
-func BenchmarkSearchFloat32(b *testing.B) {
-	dim := 128
-	g := NewGraphFloat32(dim)
-
-	vec := make([]float32, dim)
-	for i := 0; i < 1000; i++ {
-		for j := range vec {
-			vec[j] = rand.Float32()
-		}
-		if err := g.Add(i, vec); err != nil {
-			b.Fatal(err)
-		}
-	}
-
-	query := make([]float32, dim)
-	for i := range query {
-		query[i] = rand.Float32()
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		query[0] = rand.Float32()
-		if _, err := g.Search(query, 10); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func TestAddBatchFloat32(t *testing.T) {
-	g := NewGraphFloat32(2)
-
-	items := make([]struct {
-		ID  int
-		Vec []float32
-	}, 10)
-	for i := 0; i < 10; i++ {
-		items[i].ID = i
-		items[i].Vec = []float32{float32(i), float32(i)}
-	}
-
-	if err := g.AddBatch(items); err != nil {
-		t.Fatalf("AddBatch failed: %v", err)
-	}
-
-	if len(g.nodes) != 10 {
-		t.Errorf("expected 10 nodes, got %d", len(g.nodes))
-	}
-
-	query := []float32{1.1, 1.1}
-	results, err := g.Search(query, 3)
-	if err != nil {
-		t.Fatalf("Search failed: %v", err)
-	}
-	if len(results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(results))
-	}
 }

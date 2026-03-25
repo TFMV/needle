@@ -25,7 +25,7 @@ func TestPQCodec(t *testing.T) {
 	}
 
 	// Create a new PQ codec
-	pq, err := NewPQCodec[float32](dim, numSubspaces, centroidsPerSubspace, l2Float32)
+	pq, err := NewPQCodec[float32](dim, numSubspaces, centroidsPerSubspace, l2Float32Ptr)
 	assert.NoError(t, err)
 
 	// Train the codec
@@ -44,5 +44,5 @@ func TestPQCodec(t *testing.T) {
 	assert.Equal(t, dim, len(decodedVec))
 
 	// Check that the distance between the.original and decoded vector is reasonable
-	assert.InDelta(t, 0, l2Float32(vec, decodedVec), 5.0)
+	assert.InDelta(t, 0, l2Float32Ptr(&vec[0], &decodedVec[0], dim), 5.0)
 }

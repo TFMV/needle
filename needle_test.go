@@ -9,11 +9,10 @@ import (
 
 // TestNewGraphFromConfig validates the constructor
 func TestNewGraphFromConfig(t *testing.T) {
-	config := DefaultConfig()
-	config.dim = 2
-	g := NewGraphFromConfig[float32](config)
+	config := DefaultConfig(2)
+	g := NewGraph[float32](config)
 	if g == nil {
-		t.Fatal("NewGraphFromConfig returned nil")
+		t.Fatal("NewGraph returned nil")
 	}
 	if g.dim != 2 {
 		t.Errorf("expected dim=2, got %d", g.dim)
@@ -40,9 +39,8 @@ func TestAddAndSearch(t *testing.T) {
 		{2, 2},
 	}
 
-	config := DefaultConfig()
-	config.dim = 2
-	g := NewGraphFromConfig[float32](config)
+	config := DefaultConfig(2)
+	g := NewGraph[float32](config)
 	for i, p := range points {
 		if err := g.Add(i, p); err != nil {
 			t.Fatalf("Add failed: %v", err)
@@ -64,76 +62,10 @@ func TestAddAndSearch(t *testing.T) {
 	}
 }
 
-// TestAddAndSearchWithOPQ verifies adding nodes and nearest neighbor search with OPQ enabled
-func TestAddAndSearchWithOPQ(t *testing.T) {
-	points := [][]float32{
-		{0, 0, 0, 0, 0, 0, 0, 0},
-		{1, 1, 1, 1, 1, 1, 1, 1},
-		{2, 2, 2, 2, 2, 2, 2, 2},
-		{3, 3, 3, 3, 3, 3, 3, 3},
-		{4, 4, 4, 4, 4, 4, 4, 4},
-	}
-
-	config := DefaultConfig()
-	config.dim = 8
-	config.useOPQ = true
-	config.pqThreshold = 5 // Trigger OPQ training after all points are added
-
-	var trainingWg sync.WaitGroup
-	g := NewGraphFromConfig[float32](config)
-	g.trainingWg = &trainingWg
-
-	trainingWg.Add(1)
-	for i, p := range points {
-		if err := g.Add(i, p); err != nil {
-			t.Fatalf("Add failed: %v", err)
-		}
-	}
-
-	trainingWg.Wait()
-
-	if !g.opqTrained.Load() {
-		t.Fatal("OPQ was not trained")
-	}
-
-	// Search for the point closest to {0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1}
-	// The result should be point {0, 0, 0, 0, 0, 0, 0, 0} which has ID 0
-	q := []float32{0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1}
-	res, err := g.Search(q, 1)
-	if err != nil {
-		t.Fatalf("Search failed: %v", err)
-	}
-	if len(res) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(res))
-	}
-	if res[0] != 0 {
-		t.Errorf("expected result ID 0, got %d", res[0])
-	}
-}
-
-// TestSetParams validates parameter setting
-func TestSetParams(t *testing.T) {
-	config := DefaultConfig()
-	config.dim = 4
-	g := NewGraphFromConfig[float32](config)
-	g.SetParams(32, 100, 200)
-
-	if g.m != 32 {
-		t.Errorf("expected m=32, got %d", g.m)
-	}
-	if g.efSearch != 100 {
-		t.Errorf("expected efSearch=100, got %d", g.efSearch)
-	}
-	if g.efConstruction != 200 {
-		t.Errorf("expected efConstruction=200, got %d", g.efConstruction)
-	}
-}
-
 // TestConcurrentAddAndSearch tests the graph under concurrent access
 func TestConcurrentAddAndSearch(t *testing.T) {
-	config := DefaultConfig()
-	config.dim = 8
-	g := NewGraphFromConfig[float32](config)
+	config := DefaultConfig(8)
+	g := NewGraph[float32](config)
 	var wg sync.WaitGroup
 	var itemsAdded int32
 

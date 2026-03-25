@@ -75,7 +75,7 @@ func (pq *PQCodec[T]) kmeans(data [][]T) [][]T {
 		for j, point := range data {
 			minDistToCentroid := float32(math.MaxFloat32)
 			for k := 0; k < i; k++ {
-				d := pq.dist(point, centroids[k])
+				d := pq.dist(&point[0], &centroids[k][0], pq.SubvectorDim)
 				if d < minDistToCentroid {
 					minDistToCentroid = d
 				}
@@ -118,7 +118,7 @@ func (pq *PQCodec[T]) kmeans(data [][]T) [][]T {
 			minDist := float32(math.MaxFloat32)
 			bestCentroid := 0
 			for centroidIdx, centroid := range centroids {
-				dist := pq.dist(point, centroid)
+				dist := pq.dist(&point[0], &centroid[0], pq.SubvectorDim)
 				if dist < minDist {
 					minDist = dist
 					bestCentroid = centroidIdx
@@ -169,7 +169,7 @@ func (pq *PQCodec[T]) kmeans(data [][]T) [][]T {
 
 		var totalMovement float32
 		for i := range centroids {
-			totalMovement += pq.dist(oldCentroids[i], centroids[i])
+			totalMovement += pq.dist(&oldCentroids[i][0], &centroids[i][0], pq.SubvectorDim)
 		}
 
 		if totalMovement/float32(pq.CentroidsPerSubspace) < convergenceThreshold {
@@ -194,7 +194,7 @@ func (pq *PQCodec[T]) Encode(vec []T) []byte {
 		minDist := float32(math.MaxFloat32)
 
 		for j, centroid := range pq.Codebooks[i] {
-			dist := pq.dist(subVec, centroid)
+			dist := pq.dist(&subVec[0], &centroid[0], pq.SubvectorDim)
 			if dist < minDist {
 				minDist = dist
 				bestCentroid = j
@@ -232,7 +232,7 @@ func (pq *PQCodec[T]) Distance(query []T, code []byte) float32 {
 			continue
 		}
 		centroid := pq.Codebooks[i][centroidID]
-		totalDist += pq.dist(subVec, centroid)
+		totalDist += pq.dist(&subVec[0], &centroid[0], pq.SubvectorDim)
 	}
 	return totalDist
 }

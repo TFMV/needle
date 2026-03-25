@@ -81,3 +81,77 @@ We have implemented a SIMD-optimized L2 distance function for the `amd64` archit
 *   **`BenchmarkSearchLatency`**:
     *   **Time per operation**: 127,073,309 ns (127 ms)
 *   **`BenchmarkSearchRecall`**: **98.6% recall@10**
+
+## Cache Optimization: Aligned `vectorData` and `[]Node`
+
+*   **`BenchmarkBuild`**: 559,029,603 ns/op
+*   **`BenchmarkSearchLatency`**: 103,831,057 ns/op
+*   **`BenchmarkSearchRecall`**: 46,386,771 ns/op, recall 0.9870
+
+## Cache Optimization: Contiguous `Node.neighbors` (Regressions)
+
+*   **`BenchmarkBuild`**: 762,273,426 ns/op
+*   **`BenchmarkSearchLatency`**: 65,606,970 ns/op
+*   **`BenchmarkSearchRecall`**: 57,086,351 ns/op, recall 0.9860
+
+## Reverted `Node.neighbors` Optimization
+
+*   **`BenchmarkBuild`**: 523,145,174 ns/op
+*   **`BenchmarkSearchLatency`**: 119,351,230 ns/op
+*   **`BenchmarkSearchRecall`**: 64,629,164 ns/op, recall 0.9960
+
+## Inefficient Pruning Logic (Regressions)
+
+*   **`BenchmarkBuild`**: 765,297,460 ns/op
+*   **`BenchmarkSearchLatency`**: 144,581,019 ns/op
+*   **`BenchmarkSearchRecall`**: 49,297,947 ns/op, recall 0.9810
+
+## Efficient Pruning Logic
+
+*   **`BenchmarkBuild`**: 466,039,058 ns/op
+*   **`BenchmarkSearchLatency`**: 108,171,806 ns/op
+*   **`BenchmarkSearchRecall`**: 59,226,494 ns/op, recall 0.9830
+
+## Memory-Optimized Pruning
+
+*   **`BenchmarkBuild`**: 430,284,992 ns/op
+*   **`BenchmarkSearchLatency`**: 84,292,902 ns/op
+*   **`BenchmarkSearchRecall`**: 82,268,754 ns/op, recall 0.9860
+
+## Final Benchmark Results
+
+After resolving all build and linker errors, we have a final, stable set of benchmarks.
+
+*   **`BenchmarkBuild`**:
+    *   **Time per operation**: 170,367,998 ns (0.17 seconds)
+    *   **Memory per operation**: 4,451,832 bytes (4.45 MB)
+    *   **Allocations per operation**: 51,174
+*   **`BenchmarkSearchLatency`**:
+    *   **Time per operation**: 10,686,211 ns (10.69 ms)
+    *   **Memory per operation**: 128,049 bytes (128 KB)
+    *   **Allocations per operation**: 400
+*   **`BenchmarkSearchRecall`**:
+    *   **Time per operation**: 17,291,056 ns (17.29 ms)
+    *   **Recall**: 98.3% recall@k
+    *   **Memory per operation**: 161,096 bytes (161 KB)
+    *   **Allocations per operation**: 700
+
+## Benchmark Results After Pointer-Based Distance Calculation Refactor
+
+| Benchmark | Iterations | Time/Operation | Bytes/Operation | Allocations/Operation | Extra Metrics |
+|---|---|---|---|---|---|
+| BenchmarkBuild-2 | 7 | 288970277 ns/op | 4284960 B/op | 45550 allocs/op | |
+| BenchmarkSearchLatency-2 | 75 | 14095075 ns/op | 128045 B/op | 400 allocs/op | |
+| BenchmarkSearchRecall-2 | 76 | 14648046 ns/op | 160897 B/op | 700 allocs/op | 0.9750 recall@k |
+
+## AVX2-Optimized L2 Distance
+
+We implemented an AVX2-optimized L2 distance function and compared its performance against the scalar implementation. The benchmarks were run for vector dimensions of 128, 256, and 768.
+
+| Dimension | Scalar Implementation (ns/op) | AVX2 Implementation (ns/op) | Speedup |
+|---|---|---|---|
+| 128 | 93.82 | 33.66 | **2.79x** |
+| 256 | 181.9 | 77.63 | **2.34x** |
+| 768 | 566.7 | 192.2 | **2.95x** |
+
+The results show a significant performance improvement, with the AVX2 implementation being approximately 2.3x to 3x faster than the scalar version.

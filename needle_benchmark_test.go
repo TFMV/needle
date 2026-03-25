@@ -23,7 +23,7 @@ func bruteForceKNN(dataset [][]float32, query []float32, k int) []int {
 
 	distances := make([]distIdx, len(dataset))
 	for i, vec := range dataset {
-		distances[i] = distIdx{dist: l2Float32(query, vec), idx: i}
+		distances[i] = distIdx{dist: l2Float32Ptr(&query[0], &vec[0], dim), idx: i}
 	}
 
 	sort.Slice(distances, func(i, j int) bool {
@@ -68,19 +68,12 @@ func generateData(n, dim int) [][]float32 {
 
 func setupGraph(b *testing.B, n, dim int, vectors [][]float32) *Graph[float32] {
 	b.Helper()
-	config := DefaultConfig()
-	config.dim = dim
-	g := NewGraphFromConfig[float32](config)
+	config := DefaultConfig(dim)
+	g := NewGraph[float32](config)
 
-	items := make([]struct {
-		ID  int
-		Vec []float32
-	}, n)
+	items := make([]Item[float32], n)
 	for i := 0; i < n; i++ {
-		items[i] = struct {
-			ID  int
-			Vec []float32
-		}{ID: i, Vec: vectors[i]}
+		items[i] = Item[float32]{ID: i, Vec: vectors[i]}
 	}
 
 	if err := g.AddBatch(items); err != nil {

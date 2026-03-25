@@ -183,3 +183,11 @@ Needle has achieved its goal of becoming the **fastest pure Go HNSW implementati
 Needle has successfully evolved from a basic Go HNSW implementation to a **world-class, production-ready search engine** that competes directly with the fastest implementations while maintaining the benefits of pure Go and Arrow integration.
 
 The future of high-performance vector search in Go is here! 🚀
+
+## Benchmark Results After `AddBatch` Re-Implementation
+
+| Benchmark | Iterations | Time/Operation | Bytes/Operation | Allocations/Operation | Extra Metrics |
+|---|---|---|---|---|---|
+| BenchmarkBuild-2 | 6 | 239850554 ns/op | 3407142 B/op | 44390 allocs/op | |
+| BenchmarkSearchLatency-2 | 74 | 16091466 ns/op | 128078 B/op | 400 allocs/op | |
+| BenchmarkSearchRecall-2 | 80 | 14528805 ns/op | 160890 B/op | 700 allocs/op | 0.9730 recall@k |

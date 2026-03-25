@@ -143,7 +143,7 @@ func (opq *OPQCodec[T]) Encode(vec []T) []byte {
 		minDist := float32(math.MaxFloat32)
 
 		for j, centroid := range opq.Codebooks[i] {
-			dist := opq.dist(subVec, centroid)
+			dist := opq.dist(&subVec[0], &centroid[0], opq.SubvectorDim)
 			if dist < minDist {
 				minDist = dist
 				bestCentroid = j
@@ -185,7 +185,7 @@ func (opq *OPQCodec[T]) Distance(query []T, code []byte) float32 {
 		subVec := rotatedQuery[start:end]
 		centroidID := int(code[i])
 		centroid := opq.Codebooks[i][centroidID]
-		totalDist += opq.dist(subVec, centroid)
+		totalDist += opq.dist(&subVec[0], &centroid[0], opq.SubvectorDim)
 	}
 	return totalDist
 }

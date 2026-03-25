@@ -1,7 +1,9 @@
 package needle
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 )
@@ -75,7 +77,7 @@ func (pq *PQCodec[T]) kmeans(data [][]T) [][]T {
 		for j, point := range data {
 			minDistToCentroid := float32(math.MaxFloat32)
 			for k := 0; k < i; k++ {
-				d := pq.dist(&point[0], &centroids[k][0], pq.SubvectorDim)
+				d := pq.dist(point, centroids[k])
 				if d < minDistToCentroid {
 					minDistToCentroid = d
 				}
@@ -118,7 +120,7 @@ func (pq *PQCodec[T]) kmeans(data [][]T) [][]T {
 			minDist := float32(math.MaxFloat32)
 			bestCentroid := 0
 			for centroidIdx, centroid := range centroids {
-				dist := pq.dist(&point[0], &centroid[0], pq.SubvectorDim)
+				dist := pq.dist(point, centroid)
 				if dist < minDist {
 					minDist = dist
 					bestCentroid = centroidIdx
@@ -169,7 +171,7 @@ func (pq *PQCodec[T]) kmeans(data [][]T) [][]T {
 
 		var totalMovement float32
 		for i := range centroids {
-			totalMovement += pq.dist(&oldCentroids[i][0], &centroids[i][0], pq.SubvectorDim)
+			totalMovement += pq.dist(oldCentroids[i], centroids[i])
 		}
 
 		if totalMovement/float32(pq.CentroidsPerSubspace) < convergenceThreshold {
@@ -194,7 +196,7 @@ func (pq *PQCodec[T]) Encode(vec []T) []byte {
 		minDist := float32(math.MaxFloat32)
 
 		for j, centroid := range pq.Codebooks[i] {
-			dist := pq.dist(&subVec[0], &centroid[0], pq.SubvectorDim)
+			dist := pq.dist(subVec, centroid)
 			if dist < minDist {
 				minDist = dist
 				bestCentroid = j
@@ -232,7 +234,63 @@ func (pq *PQCodec[T]) Distance(query []T, code []byte) float32 {
 			continue
 		}
 		centroid := pq.Codebooks[i][centroidID]
-		totalDist += pq.dist(&subVec[0], &centroid[0], pq.SubvectorDim)
+		totalDist += pq.dist(subVec, centroid)
 	}
 	return totalDist
+}
+
+// WriteTo serializes the PQCodec to a writer.
+func (pq *PQCodec[T]) WriteTo(w io.Writer) error {
+	// Write metadata
+	if err := binary.Write(w, binary.LittleEndian, int32(pq.NumSubspaces)); err != nil {
+		return fmt.Errorf("failed to write num subspaces: %w", err)
+	}
+	if err := binary.Write(w, binary.LittleEndian, int32(pq.CentroidsPerSubspace)); err != nil {
+		return fmt.Errorf("failed to write centroids per subspace: %w", err)
+	}
+	if err := binary.Write(w, binary.LittleEndian, int32(pq.SubvectorDim)); err != nil {
+		return fmt.Errorf("failed to write subvector dim: %w", err)
+	}
+
+	// Write codebooks
+	for _, subspace := range pq.Codebooks {
+		for _, centroid := range subspace {
+			if err := binary.Write(w, binary.LittleEndian, centroid); err != nil {
+				return fmt.Errorf("failed to write centroid: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// ReadFrom deserializes the PQCodec from a reader.
+func (pq *PQCodec[T]) ReadFrom(r io.Reader) error {
+	// Read metadata
+	var numSubspaces, centroidsPerSubspace, subvectorDim int32
+	if err := binary.Read(r, binary.LittleEndian, &numSubspaces); err != nil {
+		return fmt.Errorf("failed to read num subspaces: %w", err)
+	}
+	if err := binary.Read(r, binary.LittleEndian, &centroidsPerSubspace); err != nil {
+		return fmt.Errorf("failed to read centroids per subspace: %w", err)
+	}
+	if err := binary.Read(r, binary.LittleEndian, &subvectorDim); err != nil {
+		return fmt.Errorf("failed to read subvector dim: %w", err)
+	}
+
+	pq.NumSubspaces = int(numSubspaces)
+	pq.CentroidsPerSubspace = int(centroidsPerSubspace)
+	pq.SubvectorDim = int(subvectorDim)
+
+	// Allocate and read codebooks
+	pq.Codebooks = make([][][]T, pq.NumSubspaces)
+	for i := 0; i < pq.NumSubspaces; i++ {
+		pq.Codebooks[i] = make([][]T, pq.CentroidsPerSubspace)
+		for j := 0; j < pq.CentroidsPerSubspace; j++ {
+			pq.Codebooks[i][j] = make([]T, pq.SubvectorDim)
+			if err := binary.Read(r, binary.LittleEndian, pq.Codebooks[i][j]); err != nil {
+				return fmt.Errorf("failed to read centroid for subspace %d, centroid %d: %w", i, j, err)
+			}
+		}
+	}
+	return nil
 }

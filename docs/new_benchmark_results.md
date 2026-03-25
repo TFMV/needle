@@ -81,3 +81,39 @@ We have implemented a SIMD-optimized L2 distance function for the `amd64` archit
 *   **`BenchmarkSearchLatency`**:
     *   **Time per operation**: 127,073,309 ns (127 ms)
 *   **`BenchmarkSearchRecall`**: **98.6% recall@10**
+
+## Cache Optimization: Aligned `vectorData` and `[]Node`
+
+*   **`BenchmarkBuild`**: 559,029,603 ns/op
+*   **`BenchmarkSearchLatency`**: 103,831,057 ns/op
+*   **`BenchmarkSearchRecall`**: 46,386,771 ns/op, recall 0.9870
+
+## Cache Optimization: Contiguous `Node.neighbors` (Regressions)
+
+*   **`BenchmarkBuild`**: 762,273,426 ns/op
+*   **`BenchmarkSearchLatency`**: 65,606,970 ns/op
+*   **`BenchmarkSearchRecall`**: 57,086,351 ns/op, recall 0.9860
+
+## Reverted `Node.neighbors` Optimization
+
+*   **`BenchmarkBuild`**: 523,145,174 ns/op
+*   **`BenchmarkSearchLatency`**: 119,351,230 ns/op
+*   **`BenchmarkSearchRecall`**: 64,629,164 ns/op, recall 0.9960
+
+## Inefficient Pruning Logic (Regressions)
+
+*   **`BenchmarkBuild`**: 765,297,460 ns/op
+*   **`BenchmarkSearchLatency`**: 144,581,019 ns/op
+*   **`BenchmarkSearchRecall`**: 49,297,947 ns/op, recall 0.9810
+
+## Efficient Pruning Logic
+
+*   **`BenchmarkBuild`**: 466,039,058 ns/op
+*   **`BenchmarkSearchLatency`**: 108,171,806 ns/op
+*   **`BenchmarkSearchRecall`**: 59,226,494 ns/op, recall 0.9830
+
+## Memory-Optimized Pruning
+
+*   **`BenchmarkBuild`**: 430,284,992 ns/op
+*   **`BenchmarkSearchLatency`**: 84,292,902 ns/op
+*   **`BenchmarkSearchRecall`**: 82,268,754 ns/op, recall 0.9860

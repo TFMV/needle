@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -104,10 +105,14 @@ type Node struct {
 	neighbors [][]uint32
 }
 
-func newNode(id, idx, lvl int) Node {
+func newNode(id, idx, lvl int, m int) Node {
 	nbrs := make([][]uint32, lvl+1)
 	for i := range nbrs {
-		nbrs[i] = make([]uint32, 0, 32)
+		if i == 0 {
+			nbrs[i] = make([]uint32, 0, 2*m)
+		} else {
+			nbrs[i] = make([]uint32, 0, m)
+		}
 	}
 	return Node{id: id, idx: idx, level: lvl, neighbors: nbrs}
 }
@@ -178,6 +183,7 @@ type Graph[T Float] struct {
 	minHeapPool        sync.Pool // Pool for min-heaps used in search
 	maxHeapPool        sync.Pool // Pool for max-heaps used in search
 	arenaPool          sync.Pool // Pool for candidate arenas used in search
+	pruneArenaPool     sync.Pool // Pool for candidate arenas used in pruning
 	candidateSlicePool sync.Pool // Pool for candidate slices used in searchLayer
 
 	// For testing purposes
@@ -211,6 +217,11 @@ func NewGraphFromConfig[T Float](config *Config[T]) *Graph[T] {
 		arenaPool: sync.Pool{
 			New: func() interface{} {
 				return make([]candidate, 0, 1024)
+			},
+		},
+		pruneArenaPool: sync.Pool{
+			New: func() interface{} {
+				return make([]candidate, 0, 2*config.m)
 			},
 		},
 		candidateSlicePool: sync.Pool{
@@ -287,7 +298,7 @@ func (g *Graph[T]) Add(id int, vec []T) error {
 		g.pqCodes = append(g.pqCodes, nil) // Placeholder
 	}
 
-	node := newNode(id, idx, g.randomLevel())
+	node := newNode(id, idx, g.randomLevel(), g.m)
 
 	g.nodes = append(g.nodes, node)
 	g.idToIdx[id] = idx
@@ -552,9 +563,56 @@ func (g *Graph[T]) connect(n *Node) {
 		selected := g.selectNeighbors(cands, g.m)
 		g.candidateSlicePool.Put(&cands)
 
+		// Add connections from the new node 'n' to its selected neighbors
 		for _, c := range selected {
 			n.neighbors[l] = append(n.neighbors[l], uint32(c.idx))
-			g.nodes[c.idx].neighbors[l] = append(g.nodes[c.idx].neighbors[l], uint32(n.idx))
+		}
+		g.prune(n, l)
+
+		// Now, create the reciprocal connections and prune the neighbors
+		for _, c := range selected {
+			neighborNode := &g.nodes[c.idx]
+			neighborNode.neighbors[l] = append(neighborNode.neighbors[l], uint32(n.idx))
+			g.prune(neighborNode, l)
+		}
+	}
+}
+
+func (g *Graph[T]) prune(n *Node, l int) {
+	maxN := g.m
+	if l == 0 {
+		maxN *= 2
+	}
+
+	if len(n.neighbors[l]) > maxN {
+		cands := g.pruneArenaPool.Get().([]candidate)
+		defer func() {
+			cands = cands[:0] // Reset slice before returning to pool
+			g.pruneArenaPool.Put(cands)
+		}()
+
+		vec := g.getVector(n.idx)
+
+		if cap(cands) < len(n.neighbors[l]) {
+			cands = make([]candidate, len(n.neighbors[l]))
+		} else {
+			cands = cands[:len(n.neighbors[l])]
+		}
+
+		for i, neighborIdx := range n.neighbors[l] {
+			cands[i] = candidate{
+				idx:  int(neighborIdx),
+				dist: g.dist(vec, g.getVector(int(neighborIdx))),
+			}
+		}
+
+		sort.Slice(cands, func(i, j int) bool {
+			return cands[i].dist < cands[j].dist
+		})
+
+		n.neighbors[l] = n.neighbors[l][:0]
+		for i := 0; i < maxN; i++ {
+			n.neighbors[l] = append(n.neighbors[l], uint32(cands[i].idx))
 		}
 	}
 }

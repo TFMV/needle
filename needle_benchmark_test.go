@@ -23,7 +23,7 @@ func bruteForceKNN(dataset [][]float32, query []float32, k int) []int {
 
 	distances := make([]distIdx, len(dataset))
 	for i, vec := range dataset {
-		distances[i] = distIdx{dist: l2Float32Ptr(&query[0], &vec[0], dim), idx: i}
+		distances[i] = distIdx{dist: l2Float32Scalar(query, vec), idx: i}
 	}
 
 	sort.Slice(distances, func(i, j int) bool {

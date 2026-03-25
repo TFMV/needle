@@ -19,23 +19,19 @@ type Float interface {
 	~float32 | ~float64
 }
 
-type DistanceFunc[T Float] func(a, b *T, dim int) float32
+type DistanceFunc[T Float] func(a, b []T) float32
 
-func l2Float32Ptr(aPtr, bPtr *float32, dim int) float32 {
+func l2Float32(a, b []float32) float32 {
 	if useAVX2 {
-		return l2Float32AVX2(aPtr, bPtr, dim)
+		return l2Float32AVX2(a, b)
 	}
-	return l2Float32Scalar(aPtr, bPtr, dim)
+	return l2Float32Scalar(a, b)
 }
 
-func l2Generic[T Float](aPtr, bPtr *T, dim int) float32 {
+func l2Generic[T Float](a, b []T) float32 {
 	var sum float32
-	size := unsafe.Sizeof(*aPtr)
-
-	for i := 0; i < dim; i++ {
-		a := *(*T)(unsafe.Add(unsafe.Pointer(aPtr), uintptr(i)*size))
-		b := *(*T)(unsafe.Add(unsafe.Pointer(bPtr), uintptr(i)*size))
-		d := float32(a - b)
+	for i := 0; i < len(a); i++ {
+		d := float32(a[i] - b[i])
 		sum += d * d
 	}
 	return sum
@@ -125,7 +121,7 @@ func DefaultConfig(dim int) *Config[float32] {
 		m:              16,
 		efSearch:       64,
 		efConstruction: 128,
-		dist:           l2Float32Ptr,
+		dist:           l2Float32,
 	}
 }
 
@@ -158,7 +154,7 @@ type Graph[T Float] struct {
 	mu sync.RWMutex
 
 	minHeapPool        sync.Pool
-	maxHeapPool        sync.Pool
+	topkPool           sync.Pool
 	arenaPool          sync.Pool
 	pruneArenaPool     sync.Pool
 	candidateSlicePool sync.Pool
@@ -182,8 +178,8 @@ func NewGraph[T Float](config *Config[T]) *Graph[T] {
 		minHeapPool: sync.Pool{
 			New: func() any { h := minHeap(make([]*candidate, 0, 128)); return &h },
 		},
-		maxHeapPool: sync.Pool{
-			New: func() any { h := maxHeap(make([]*candidate, 0, 128)); return &h },
+		topkPool: sync.Pool{
+			New: func() any { return newTopK(128) },
 		},
 		arenaPool:          sync.Pool{New: func() any { return make([]candidate, 0, 1024) }},
 		pruneArenaPool:     sync.Pool{New: func() any { return make([]candidate, 0, 64) }},
@@ -285,7 +281,7 @@ func (g *Graph[T]) Search(q []T, k int) ([]int, error) {
 	}
 	defer g.visitedPool.Put(visited)
 
-	res := g.searchInternal(&q[0], k, visited)
+	res := g.searchInternal(q, k, visited)
 
 	out := make([]int, len(res))
 	for i, c := range res {
@@ -298,15 +294,15 @@ func (g *Graph[T]) Search(q []T, k int) ([]int, error) {
 // CORE SEARCH      //
 //////////////////////
 
-func (g *Graph[T]) searchInternal(qPtr *T, k int, visited *VisitedList) []*candidate {
+func (g *Graph[T]) searchInternal(q []T, k int, visited *VisitedList) []*candidate {
 	ep := (*Node)(atomic.LoadPointer(&g.enter))
 	maxLevel := int(g.level.Load())
 
 	for l := maxLevel; l > 0; l-- {
-		ep = g.greedy(qPtr, ep, l)
+		ep = g.greedy(q, ep, l)
 	}
 
-	cands := g.searchLayer(qPtr, ep, 0, max(g.efSearch, k), visited)
+	cands := g.searchLayer(q, ep, 0, max(g.efSearch, k), visited)
 
 	if len(cands) > k {
 		cands = cands[:k]
@@ -314,15 +310,15 @@ func (g *Graph[T]) searchInternal(qPtr *T, k int, visited *VisitedList) []*candi
 	return cands
 }
 
-func (g *Graph[T]) greedy(qPtr *T, cur *Node, lvl int) *Node {
+func (g *Graph[T]) greedy(q []T, cur *Node, lvl int) *Node {
 	best := cur
-	bestDist := g.dist(qPtr, g.vecPtr(cur.idx), g.dim)
+	bestDist := g.dist(q, g.vec(cur.idx))
 
 	for {
 		changed := false
 		for _, ni := range best.neighbors[lvl] {
 			n := &g.nodes[int(ni)]
-			d := g.dist(qPtr, g.vecPtr(n.idx), g.dim)
+			d := g.dist(q, g.vec(n.idx))
 			if d < bestDist {
 				bestDist = d
 				best = n
@@ -336,57 +332,42 @@ func (g *Graph[T]) greedy(qPtr *T, cur *Node, lvl int) *Node {
 	return best
 }
 
-func (g *Graph[T]) searchLayer(qPtr *T, entry *Node, lvl, ef int, visited *VisitedList) []*candidate {
+func (g *Graph[T]) searchLayer(q []T, entry *Node, lvl, ef int, visited *VisitedList) []*candidate {
 	visited.Reset()
-
-	arena := g.arenaPool.Get().([]candidate)
-	arena = arena[:0]
-	defer g.arenaPool.Put(arena)
 
 	pq := g.minHeapPool.Get().(*minHeap)
 	pq.Reset()
 	defer g.minHeapPool.Put(pq)
 
-	res := g.maxHeapPool.Get().(*maxHeap)
-	res.Reset()
-	defer g.maxHeapPool.Put(res)
+	topk := g.topkPool.Get().(*topK)
+	topk.Reset()
+	defer g.topkPool.Put(topk)
 
-	newCand := func(idx int, dist float32) *candidate {
-		arena = append(arena, candidate{idx: idx, dist: dist})
-		return &arena[len(arena)-1]
-	}
+	d0 := g.dist(q, g.vec(entry.idx))
 
-	d0 := g.dist(qPtr, g.vecPtr(entry.idx), g.dim)
-	c0 := newCand(entry.idx, d0)
-
-	heap.Push(pq, c0)
-	heap.Push(res, c0)
+	heap.Push(pq, &candidate{idx: entry.idx, dist: d0})
+	topk.Insert(entry.idx, d0)
 	visited.Mark(entry.idx)
 
 	for pq.Len() > 0 {
 		c := heap.Pop(pq).(*candidate)
 
-		if res.Len() >= ef && c.dist > (*res)[0].dist {
+		if c.dist > topk.maxD {
 			break
 		}
 
-		for _, ni := range g.nodes[c.idx].neighbors[lvl] {
-			i := int(ni)
-			if visited.Seen(i) {
+		neighbors := g.nodes[c.idx].neighbors[lvl]
+		for _, neighborIdx := range neighbors {
+			idx := int(neighborIdx)
+			if visited.Seen(idx) {
 				continue
 			}
-			visited.Mark(i)
+			visited.Mark(idx)
 
-			d := g.dist(qPtr, g.vecPtr(i), g.dim)
-
-			if res.Len() < ef || d < (*res)[0].dist {
-				cand := newCand(i, d)
-				heap.Push(pq, cand)
-				heap.Push(res, cand)
-
-				if res.Len() > ef {
-					heap.Pop(res)
-				}
+			dist := g.dist(q, g.vec(idx))
+			if !topk.isFull() || dist < topk.maxD {
+				heap.Push(pq, &candidate{idx: idx, dist: dist})
+				topk.Insert(idx, dist)
 			}
 		}
 	}
@@ -394,12 +375,8 @@ func (g *Graph[T]) searchLayer(qPtr *T, entry *Node, lvl, ef int, visited *Visit
 	outPtr := g.candidateSlicePool.Get().(*[]*candidate)
 	out := (*outPtr)[:0]
 
-	for res.Len() > 0 {
-		out = append(out, heap.Pop(res).(*candidate))
-	}
-
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
+	for i := 0; i < topk.size; i++ {
+		out = append(out, &candidate{idx: topk.idx[i], dist: topk.dist[i]})
 	}
 
 	*outPtr = out
@@ -415,10 +392,10 @@ func (g *Graph[T]) connect(n *Node) {
 	maxLevel := int(g.level.Load())
 
 	cur := ep
-	vectorPtr := g.vecPtr(n.idx)
+	vector := g.vec(n.idx)
 
 	for l := maxLevel; l > n.level; l-- {
-		cur = g.greedy(vectorPtr, cur, l)
+		cur = g.greedy(vector, cur, l)
 	}
 
 	visited := g.visitedPool.Get().(*VisitedList)
@@ -428,7 +405,7 @@ func (g *Graph[T]) connect(n *Node) {
 	defer g.visitedPool.Put(visited)
 
 	for l := min(n.level, maxLevel); l >= 0; l-- {
-		cands := g.searchLayer(vectorPtr, cur, l, g.efConstruction, visited)
+		cands := g.searchLayer(vector, cur, l, g.efConstruction, visited)
 
 		selected := g.selectNeighbors(cands, g.m)
 
@@ -458,13 +435,13 @@ func (g *Graph[T]) prune(n *Node, l int) {
 	cands := g.pruneArenaPool.Get().([]candidate)
 	cands = cands[:0]
 
-	vecPtr := g.vecPtr(n.idx)
+	vec := g.vec(n.idx)
 
 	for _, ni := range n.neighbors[l] {
 		i := int(ni)
 		cands = append(cands, candidate{
 			idx:  i,
-			dist: g.dist(vecPtr, g.vecPtr(i), g.dim),
+			dist: g.dist(vec, g.vec(i)),
 		})
 	}
 
@@ -492,8 +469,8 @@ func (g *Graph[T]) selectNeighbors(cands []*candidate, m int) []*candidate {
 // UTIL             //
 //////////////////////
 
-func (g *Graph[T]) vecPtr(idx int) *T {
-	return &g.vectorData[idx*g.dim]
+func (g *Graph[T]) vec(idx int) []T {
+	return g.vectorData[idx*g.dim : (idx+1)*g.dim]
 }
 
 func (g *Graph[T]) randomLevel() int {

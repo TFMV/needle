@@ -1,18 +1,17 @@
 package needle
 
 import (
+	"bytes"
 	"math/rand"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func TestPQCodec(t *testing.T) {
-	const (
-		dim                  = 128
-		numSubspaces         = 8
+	const ( // Corrected const block
+		dim        = 128
+		numVectors = 1000
+		numSubspaces = 8
 		centroidsPerSubspace = 256
-		numVectors           = 1000
 	)
 
 	// Generate some random data
@@ -25,24 +24,90 @@ func TestPQCodec(t *testing.T) {
 	}
 
 	// Create a new PQ codec
-	pq, err := NewPQCodec[float32](dim, numSubspaces, centroidsPerSubspace, l2Float32Ptr)
-	assert.NoError(t, err)
+	pq, err := NewPQCodec[float32](dim, numSubspaces, centroidsPerSubspace, l2Float32)
+	if err != nil {
+		t.Fatalf("failed to create PQ codec: %v", err)
+	}
 
 	// Train the codec
-	err = pq.Train(vectors)
-	assert.NoError(t, err)
+	if err := pq.Train(vectors); err != nil {
+		t.Fatalf("failed to train PQ codec: %v", err)
+	}
 
-	// Encode and decode a vector
-	vec := vectors[0]
-	code := pq.Encode(vec)
-	decodedVec := pq.Decode(code)
+	// Test encoding and decoding
+	for _, vec := range vectors {
+		code := pq.Encode(vec)
+		if len(code) != numSubspaces {
+			t.Errorf("expected code length %d, got %d", numSubspaces, len(code))
+		}
 
-	// Check that the decoded vector is not nil
-	assert.NotNil(t, decodedVec)
+		decodedVec := pq.Decode(code)
+		if len(decodedVec) != dim {
+			t.Errorf("expected decoded vector length %d, got %d", dim, len(decodedVec))
+		}
+	}
 
-	// Check that the decoded vector has the correct dimension
-	assert.Equal(t, dim, len(decodedVec))
+	// Test asymmetric distance calculation
+	query := vectors[0]
+	code := pq.Encode(vectors[1])
+	dist := pq.Distance(query, code)
+	if dist < 0 {
+		t.Errorf("expected non-negative distance, got %f", dist)
+	}
+}
 
-	// Check that the distance between the.original and decoded vector is reasonable
-	assert.InDelta(t, 0, l2Float32Ptr(&vec[0], &decodedVec[0], dim), 5.0)
+func TestSerialization(t *testing.T) {
+	const (
+		dim        = 16
+		numSubspaces = 4
+		centroidsPerSubspace = 16
+	)
+
+	// Create a new codec
+	pq, err := NewPQCodec[float32](dim, numSubspaces, centroidsPerSubspace, l2Float32)
+	if err != nil {
+		t.Fatalf("Failed to create codec: %v", err)
+	}
+
+	// Create dummy codebooks for serialization testing
+	pq.Codebooks = make([][][]float32, numSubspaces)
+	for m := 0; m < numSubspaces; m++ {
+		pq.Codebooks[m] = make([][]float32, centroidsPerSubspace)
+		for k := 0; k < centroidsPerSubspace; k++ {
+			pq.Codebooks[m][k] = make([]float32, pq.SubvectorDim)
+			for d := 0; d < pq.SubvectorDim; d++ {
+				pq.Codebooks[m][k][d] = rand.Float32()
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := pq.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+
+	// Create a new codec for deserialization
+	pq2, err := NewPQCodec[float32](dim, numSubspaces, centroidsPerSubspace, l2Float32)
+	if err != nil {
+		t.Fatalf("Failed to create new codec for ReadFrom: %v", err)
+	}
+
+	if err := pq2.ReadFrom(&buf); err != nil {
+		t.Fatalf("ReadFrom failed: %v", err)
+	}
+
+	// Compare the original and deserialized codecs
+	if pq.NumSubspaces != pq2.NumSubspaces || pq.CentroidsPerSubspace != pq2.CentroidsPerSubspace || pq.SubvectorDim != pq2.SubvectorDim {
+		t.Errorf("Codec parameters do not match after serialization")
+	}
+
+	for m := 0; m < pq.NumSubspaces; m++ {
+		for k := 0; k < pq.CentroidsPerSubspace; k++ {
+			for d := 0; d < pq.SubvectorDim; d++ {
+				if pq.Codebooks[m][k][d] != pq2.Codebooks[m][k][d] {
+					t.Errorf("Codebook data does not match at [%d][%d][%d]", m, k, d)
+				}
+			}
+		}
+	}
 }

@@ -11,7 +11,7 @@ func fusedScanAVX2(
 	pq *minHeap,
 ) {
 	for _, idx := range cands {
-		dist := l2Float32AVX2(q, base[idx])
+		dist := l2Float32(q, base[idx])
 
 		if dist > topk.maxD {
 			continue
